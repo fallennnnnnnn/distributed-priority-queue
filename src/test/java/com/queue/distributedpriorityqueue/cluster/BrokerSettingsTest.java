@@ -3,6 +3,7 @@ package com.queue.distributedpriorityqueue.cluster;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.queue.distributedpriorityqueue.cluster.BrokerSettings.CoordinatorType;
+import com.queue.distributedpriorityqueue.core.QueueConfig;
 import java.time.Clock;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
@@ -39,6 +40,23 @@ class BrokerSettingsTest {
             assertThat(queue.replicationFactor()).isEqualTo(1);
             assertThat(queue.minInSyncReplicas()).isEqualTo(1);
             assertThat(queue.uncleanLeaderElection()).isFalse();
+        });
+    }
+
+    @Test
+    void queueDefaultsMatchTheCoreDefaults() {
+        runner.run(context -> {
+            BrokerSettings.QueueDefaults queue = context.getBean(BrokerSettings.class).queueDefaults();
+            QueueConfig core = QueueConfig.builder("orders").build();
+
+            assertThat(queue.priorityLevels()).isEqualTo(core.priorityLevels());
+            assertThat(queue.visibilityTimeout()).isEqualTo(core.visibilityTimeout());
+            assertThat(queue.maxRetries()).isEqualTo(core.maxRetries());
+            assertThat(queue.defaultTtl()).isEqualTo(core.defaultTtl());
+            assertThat(queue.shards()).isEqualTo(core.shards());
+            assertThat(queue.replicationFactor()).isEqualTo(core.replicationFactor());
+            assertThat(queue.minInSyncReplicas()).isEqualTo(core.minInSyncReplicas());
+            assertThat(queue.uncleanLeaderElection()).isEqualTo(core.uncleanLeaderElection());
         });
     }
 

@@ -136,7 +136,8 @@ REST API ──▶ Router ──▶ Shard replica (leader) ──▶ log ──�
 The client defines a queue's priority levels when creating it: an ordered list of names, highest
 first, with between 1 and 10 levels. The default is `HIGH, MEDIUM, LOW`, which is what the spec
 asks for. Each enqueue names one of the queue's levels; an enqueue with no priority gets the
-lowest level, and an unknown level is rejected. The levels are fixed once the queue exists.
+lowest level, and an unknown level is rejected. Level names are matched ignoring case. The levels
+are fixed once the queue exists.
 
 Why per queue instead of a fixed three:
 

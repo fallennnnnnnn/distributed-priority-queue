@@ -19,14 +19,14 @@ Implementation plan for the design in [README.md](README.md).
 
 ## Phase 1 — Shard state machine and log (one replica)
 
-- [ ] **1.1** Domain types: per-queue priority levels (ordered names, 1 to 10, default `HIGH, MEDIUM, LOW`), `Message`, `MessageId` (`{shard}-{offset}`), `QueueConfig` with validation and the defaults from README section 7 (one shard, no replication). (S)
-- [ ] **1.2** Events: `Enqueued`, `Delivered`, `Acked`, `Requeued`, `DeadLettered`, `Expired`, as plain records. Their wire format comes with the gRPC transport in 5.3. (S)
-- [ ] **1.3** `ShardStateMachine.apply(event)`: one lane per priority level, ID map, deadline index, TTL index, dead letters, counters. (M)
-- [ ] **1.4** Decision methods that produce events: `enqueue`, `dequeue(now)`, `ack`, `reclaim(now)`. (M)
-- [ ] **1.5** `ShardLog` interface and `InMemoryShardLog`: append, read from an offset, truncate, epoch per entry, end offset of an epoch, high watermark. (M)
-- [ ] **1.6** `Shard` leader path: lock, then decide, append, apply; returns a future that completes when the event is committed (immediately with one replica). (M)
-- [ ] **1.7** Metrics snapshot: ready count by priority, in flight, oldest message age, dead letters, counters, 60-second rates. (S)
-- [ ] **1.8** Unit tests on the manual clock (M):
+- [x] **1.1** Domain types: per-queue priority levels (ordered names, 1 to 10, default `HIGH, MEDIUM, LOW`), `Message`, `MessageId` (`{shard}-{offset}`), `QueueConfig` with validation and the defaults from README section 7 (one shard, no replication). (S)
+- [x] **1.2** Events: `Enqueued`, `Delivered`, `Acked`, `Requeued`, `DeadLettered`, `Expired`, as plain records. Their wire format comes with the gRPC transport in 5.3. (S)
+- [x] **1.3** `ShardStateMachine.apply(event)`: one lane per priority level, ID map, deadline index, TTL index, dead letters, counters. (M)
+- [x] **1.4** Decision methods that produce events: `enqueue`, `dequeue(now)`, `ack`, `reclaim(now)`. (M)
+- [x] **1.5** `ShardLog` interface and `InMemoryShardLog`: append, read from an offset, truncate, epoch per entry, end offset of an epoch, high watermark. (M)
+- [x] **1.6** `ShardReplica` leader path: lock, then decide, append, apply; returns a future that completes when the event is committed (immediately with one replica). (M)
+- [x] **1.7** Metrics snapshot: ready count by priority, in flight, oldest message age, dead letters, counters, 60-second rates. (S)
+- [x] **1.8** Unit tests on the manual clock (M):
   - priority order; FIFO within a priority
   - custom priority levels: one level behaves as plain FIFO; five levels are served in the declared order; no priority means the lowest level; an unknown level is rejected
   - an in-flight message is invisible; it returns after the timeout to its original position
@@ -35,15 +35,15 @@ Implementation plan for the design in [README.md](README.md).
   - late ack accepted (message back in ready, or redelivered to another consumer)
   - ack is idempotent; ack of an unknown ID, a never-delivered message, a dead-lettered message
   - oldest message age ignores in-flight and expired messages
-- [ ] **1.9** Replay test: a recorded event sequence applied to a fresh state machine gives identical state. (S)
-- [ ] **1.10** Concurrency tests on one shard, repeated runs (M):
+- [x] **1.9** Replay test: a recorded event sequence applied to a fresh state machine gives identical state. (S)
+- [x] **1.10** Concurrency tests on one shard, repeated runs (M):
   - no message held by two consumers at once
   - `enqueued = ready + in flight + acked + dead-lettered + expired`
   - consumers that always ack: every message acked exactly once
   - consumers that sometimes skip the ack: every message ends acked or dead-lettered
   - ack racing the visibility timeout
 
-**Exit:** FR-1 to FR-13 hold on one shard, in process.
+**Exit:** FR-3 to FR-13 hold on one shard, in process. Creating and configuring queues through the service (FR-1, FR-2) comes with the registry in phase 2.
 
 ## Phase 2 — Single-broker service: sharding, API, metrics
 
