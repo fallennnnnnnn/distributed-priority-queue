@@ -59,7 +59,12 @@ public final class InMemoryCoordinator implements Coordinator {
         for (int shard = 0; shard < shardStates.size(); shard++) {
             shards.put(new ShardId(config.name(), shard), new Versioned<>(shardStates.get(shard), ++version));
         }
-        tell(listener -> listener.onQueueChanged(config.name()));
+        tell(listener -> {
+            listener.onQueueChanged(config.name());
+            for (int shard = 0; shard < shardStates.size(); shard++) {
+                listener.onShardChanged(new ShardId(config.name(), shard));
+            }
+        });
         return true;
     }
 

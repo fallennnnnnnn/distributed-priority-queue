@@ -22,8 +22,13 @@ public final class TestBrokers {
     /** @param commitTimeout runs on real time, unlike the message timeouts, which follow the test's clock */
     public static BrokerSettings settings(String brokerId, int httpPort, Duration sweeperInterval,
             Duration commitTimeout) {
+        return settings(brokerId, httpPort, httpPort + 1000, sweeperInterval, commitTimeout);
+    }
+
+    public static BrokerSettings settings(String brokerId, int httpPort, int grpcPort, Duration sweeperInterval,
+            Duration commitTimeout) {
         return new BrokerSettings(brokerId,
-                new BrokerSettings.Advertised("localhost", httpPort, httpPort + 1000),
+                new BrokerSettings.Advertised("localhost", httpPort, grpcPort),
                 new BrokerSettings.Coordinator(BrokerSettings.CoordinatorType.MEMORY, List.of()),
                 new BrokerSettings.QueueDefaults(List.of("HIGH", "MEDIUM", "LOW"), Duration.ofSeconds(30), 3, null,
                         1, 1, 1, false),

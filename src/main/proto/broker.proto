@@ -1,0 +1,198 @@
+// What brokers say to each other. Clients never see this; they use the REST API.
+syntax = "proto3";
+
+package dpq;
+
+option java_package = "com.queue.distributedpriorityqueue.transport";
+option java_outer_classname = "Wire";
+
+service BrokerService {
+  // Requests a broker passes on to the leader of a shard.
+  rpc Enqueue (EnqueueRequest) returns (EnqueueReply);
+  rpc Dequeue (ShardRequest) returns (DequeueReply);
+  rpc Ack (AckRequest) returns (AckReply);
+  rpc Metrics (ShardRequest) returns (MetricsReply);
+  rpc DeadLetters (ShardRequest) returns (DeadLettersReply);
+
+  // The highest ready priority of each shard the broker leads, for dequeue routing.
+  rpc ReadySummary (ReadySummaryRequest) returns (ReadySummaryReply);
+
+  // Replication. The follower opens the stream and then reports how far its log reaches;
+  // the leader sends log entries until it ends the stream.
+  rpc Fetch (stream FetchUp) returns (stream FetchDown);
+}
+
+message Shard {
+  string queue = 1;
+  int32 number = 2;
+}
+
+message Time {
+  int64 epoch_second = 1;
+  int32 nano = 2;
+}
+
+message MessageRef {
+  int32 shard = 1;
+  int64 offset = 2;
+}
+
+// Every request names the leader epoch the sender believes in.
+message ShardRequest {
+  Shard shard = 1;
+  int32 epoch = 2;
+}
+
+enum Acks {
+  ALL = 0;
+  LEADER = 1;
+}
+
+message EnqueueRequest {
+  Shard shard = 1;
+  int32 epoch = 2;
+  string payload = 3;
+  optional string priority = 4;
+  optional int64 ttl_nanos = 5;
+  Acks acks = 6;
+}
+
+message EnqueueReply {
+  MessageRef id = 1;
+}
+
+enum MessageState {
+  READY = 0;
+  IN_FLIGHT = 1;
+  DEAD = 2;
+}
+
+message QueueMessage {
+  MessageRef id = 1;
+  string payload = 2;
+  int32 priority = 3;
+  MessageState state = 4;
+  int32 delivery_count = 5;
+  Time enqueued_at = 6;
+  optional Time expires_at = 7;
+  optional Time visible_at = 8;
+}
+
+message DequeueReply {
+  optional QueueMessage message = 1;
+}
+
+message AckRequest {
+  Shard shard = 1;
+  int32 epoch = 2;
+  MessageRef id = 3;
+}
+
+message AckReply {
+  bool acked = 1;
+}
+
+message MetricsReply {
+  repeated int64 ready_by_priority = 1;
+  int64 in_flight = 2;
+  int64 oldest_ready_age_nanos = 3;
+  int64 dead_letters = 4;
+  int64 enqueued_total = 5;
+  int64 delivered_total = 6;
+  int64 redelivered_total = 7;
+  int64 acked_total = 8;
+  int64 dead_lettered_total = 9;
+  int64 expired_total = 10;
+  double enqueued_per_second = 11;
+  double acked_per_second = 12;
+}
+
+message DeadLettersReply {
+  repeated QueueMessage messages = 1;
+}
+
+message ReadySummaryRequest {
+}
+
+message ReadySummaryReply {
+  repeated ShardRank shards = 1;
+}
+
+message ShardRank {
+  Shard shard = 1;
+  // -1 when nothing is ready.
+  int32 highest_ready_rank = 2;
+}
+
+message FetchUp {
+  oneof kind {
+    FetchOpen open = 1;
+    // The follower now has every entry below this offset.
+    int64 log_end = 2;
+  }
+}
+
+message FetchOpen {
+  Shard shard = 1;
+  string follower_broker = 2;
+  string follower_incarnation = 3;
+  int32 epoch = 4;
+  int64 fetch_offset = 5;
+  // -1 when the follower's log is empty.
+  int32 last_entry_epoch = 6;
+}
+
+message FetchDown {
+  oneof kind {
+    Entries entries = 1;
+    End end = 2;
+  }
+}
+
+message Entries {
+  repeated LogEntry entries = 1;
+  int64 high_watermark = 2;
+}
+
+message End {
+  enum Reason {
+    CLOSED = 0;
+    NOT_LEADER = 1;
+    FENCED_EPOCH = 2;
+    DIVERGED = 3;
+  }
+  Reason reason = 1;
+  // Only for DIVERGED: where the follower's last epoch ends in the leader's log.
+  int32 leader_epoch = 2;
+  int64 leader_epoch_end = 3;
+}
+
+message LogEntry {
+  int64 offset = 1;
+  int32 epoch = 2;
+  Event event = 3;
+}
+
+// One state transition. Every kind but Enqueued names its message by the offset of its enqueue.
+message Event {
+  Time at = 1;
+  oneof kind {
+    Enqueued enqueued = 2;
+    Delivered delivered = 3;
+    int64 acked = 4;
+    int64 requeued = 5;
+    int64 dead_lettered = 6;
+    int64 expired = 7;
+  }
+}
+
+message Enqueued {
+  string payload = 1;
+  int32 priority = 2;
+  optional Time expires_at = 3;
+}
+
+message Delivered {
+  int64 message_offset = 1;
+  Time visible_at = 2;
+}

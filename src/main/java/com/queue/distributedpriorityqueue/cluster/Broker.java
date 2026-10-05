@@ -94,7 +94,7 @@ public final class Broker implements AutoCloseable {
     }
 
     public void start() {
-        registration = coordinator.register(info, this::leaseLost);
+        registration = registerWaitingOutAnOlderLease();
         subscription = coordinator.watch(new Coordinator.Listener() {
             @Override
             public void onBrokersChanged() {
@@ -304,6 +304,30 @@ public final class Broker implements AutoCloseable {
         localShards.stop();
         if (subscription != null) {
             subscription.close();
+        }
+    }
+
+    /**
+     * A broker restarted soon after a crash can find the lease of its previous process still
+     * listed, because nothing told the coordinator that the process died. That lease runs out
+     * within the failure-detection timeout, so wait that long before giving up.
+     */
+    private Coordinator.Registration registerWaitingOutAnOlderLease() {
+        long giveUpAtNanos = System.nanoTime() + settings.failureDetectionTimeout().toNanos() * 2;
+        while (true) {
+            try {
+                return coordinator.register(info, this::leaseLost);
+            } catch (IllegalStateException alreadyRegistered) {
+                if (System.nanoTime() > giveUpAtNanos) {
+                    throw alreadyRegistered;
+                }
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw alreadyRegistered;
+                }
+            }
         }
     }
 

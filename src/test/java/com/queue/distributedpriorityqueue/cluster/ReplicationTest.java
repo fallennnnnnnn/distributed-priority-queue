@@ -324,6 +324,23 @@ class ReplicationTest {
         }
 
         @Test
+        void brokersExchangeSummariesOnTheirOwn() throws Exception {
+            startWithQueueOfThreeUnreplicatedShards(3);
+            for (int i = 0; i < 6; i++) {
+                cluster.queues("broker-1").enqueue("orders", "low-" + i, "LOW", null, null).join();
+            }
+            MessageId high = cluster.queues("broker-1").enqueue("orders", "high", "HIGH", null, "the-key").join();
+            String leaderOfHigh = cluster.leaderOf(new ShardId("orders", high.shard())).info().id();
+            String consumer = List.of("broker-1", "broker-2", "broker-3").stream()
+                    .filter(broker -> !broker.equals(leaderOfHigh)).findFirst().orElseThrow();
+
+            // Five times the summary interval, with no exchange asked for.
+            Thread.sleep(1000);
+
+            assertThat(dequeue(consumer)).map(MessageView::payload).contains("high");
+        }
+
+        @Test
         void metricsAndDeadLettersAreGatheredFromEveryLeader() {
             startWithQueueOfThreeUnreplicatedShards(0);
             for (int i = 0; i < 6; i++) {

@@ -8,6 +8,11 @@ import com.queue.distributedpriorityqueue.coordination.ShardId;
  */
 public class CommitTimeoutException extends RuntimeException {
 
+    /** For an error that another broker reported in these words. */
+    public CommitTimeoutException(String message) {
+        super(message);
+    }
+
     public CommitTimeoutException(ShardId shard) {
         super("shard " + shard + " did not replicate the write to its in-sync replicas in time");
     }

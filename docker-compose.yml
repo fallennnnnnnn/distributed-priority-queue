@@ -1,0 +1,70 @@
+# Three brokers and one etcd. The REST API of each broker is published on localhost:
+# broker-1 on 8081, broker-2 on 8082, broker-3 on 8083. A client can use any of them.
+#
+#   docker compose up --build           start the cluster
+#   docker compose kill broker-2        crash a broker; its shards fail over after about 5 seconds
+#   docker compose up -d broker-2       bring it back; it catches up as a follower
+#   docker compose --profile monitoring up    also start Prometheus on localhost:9090
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    command:
+      - etcd
+      - --name=etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  broker-1:
+    build: .
+    image: distributed-priority-queue
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      DPQ_BROKER_ID: broker-1
+      DPQ_ADVERTISED_HOST: broker-1
+      DPQ_COORDINATOR_TYPE: etcd
+      DPQ_COORDINATOR_ENDPOINTS: http://etcd:2379
+    ports:
+      - "8081:8080"
+
+  broker-2:
+    build: .
+    image: distributed-priority-queue
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      DPQ_BROKER_ID: broker-2
+      DPQ_ADVERTISED_HOST: broker-2
+      DPQ_COORDINATOR_TYPE: etcd
+      DPQ_COORDINATOR_ENDPOINTS: http://etcd:2379
+    ports:
+      - "8082:8080"
+
+  broker-3:
+    build: .
+    image: distributed-priority-queue
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      DPQ_BROKER_ID: broker-3
+      DPQ_ADVERTISED_HOST: broker-3
+      DPQ_COORDINATOR_TYPE: etcd
+      DPQ_COORDINATOR_ENDPOINTS: http://etcd:2379
+    ports:
+      - "8083:8080"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"

@@ -6,6 +6,7 @@ import com.queue.distributedpriorityqueue.demo.QueueHarness.Options;
 import com.queue.distributedpriorityqueue.demo.QueueHarness.Report;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,8 +23,8 @@ class QueueHarnessTest {
     @Test
     @Timeout(120)
     void nothingIsLostWhenSomeConsumersSkipTheirAcks() throws Exception {
-        Options options = new Options(URI.create("http://localhost:" + port), 3, 6, 600, 30, 3,
-                Duration.ofMillis(300), 2, Duration.ofSeconds(90));
+        Options options = new Options(List.of(URI.create("http://localhost:" + port)), 3, 6, 600, 30, 3, 1, 1,
+                Duration.ofMillis(300), 2, Duration.ofSeconds(90), null);
 
         Report report = QueueHarness.run(options);
 
@@ -35,14 +36,17 @@ class QueueHarnessTest {
     @Test
     @Timeout(120)
     void everyMessageIsAckedOnceWhenNoAckIsSkipped() throws Exception {
-        Options options = new Options(URI.create("http://localhost:" + port), 3, 6, 600, 0, 3,
-                Duration.ofSeconds(30), 2, Duration.ofSeconds(90));
+        Options options = new Options(List.of(URI.create("http://localhost:" + port)), 3, 6, 600, 0, 3, 1, 1,
+                Duration.ofSeconds(30), 2, Duration.ofSeconds(90), null);
 
         Report report = QueueHarness.run(options);
 
         assertThat(report.passed()).as(report.describe()).isTrue();
         assertThat(report.acked()).isEqualTo(600);
         assertThat(report.deliveries()).isEqualTo(600);
+        assertThat(report.deliveredMoreThanOnce()).isZero();
+        assertThat(report.lost()).isZero();
+        assertThat(report.retries()).isZero();
         assertThat(report.deadLettered()).isZero();
     }
 }

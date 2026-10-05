@@ -1,0 +1,10 @@
+# Scrapes every broker. Each one publishes the metrics of the shards it leads, so a queue's
+# numbers are the sum over brokers, for example:  sum by (queue) (dpq_messages_ready)
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: dpq
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["broker-1:8080", "broker-2:8080", "broker-3:8080"]
