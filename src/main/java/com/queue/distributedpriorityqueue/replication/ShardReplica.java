@@ -38,6 +38,8 @@ public final class ShardReplica {
     private final NavigableMap<Long, CompletableFuture<Void>> commitWaiters = new TreeMap<>();
     private final int epoch = 0;
     private volatile QueueConfig config;
+    /** Read without the lock by dequeue routing, so it may be a moment out of date. */
+    private volatile int highestReadyRank = -1;
 
     public ShardReplica(int shard, QueueConfig config, ShardLog log, Clock clock) {
         this.shard = shard;
@@ -45,6 +47,19 @@ public final class ShardReplica {
         this.log = log;
         this.clock = clock;
         this.state = new ShardStateMachine(shard, config.priorityLevels().size());
+    }
+
+    public int shard() {
+        return shard;
+    }
+
+    public QueueConfig config() {
+        return config;
+    }
+
+    /** The rank of the highest priority with a ready message, or -1 when nothing is ready. */
+    public int highestReadyRank() {
+        return highestReadyRank;
     }
 
     /**
@@ -140,6 +155,7 @@ public final class ShardReplica {
             committed = end == before
                     ? CompletableFuture.completedFuture(null)
                     : commitWaiters.computeIfAbsent(end - 1, offset -> new CompletableFuture<>());
+            highestReadyRank = state.highestReadyRank();
             // One replica: the leader is the whole in-sync set, so the end of its log is committed.
             nowCommitted = advanceHighWatermark(end);
         } finally {

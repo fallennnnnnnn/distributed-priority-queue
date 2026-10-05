@@ -1,5 +1,6 @@
 package com.queue.distributedpriorityqueue.cluster;
 
+import com.queue.distributedpriorityqueue.core.QueueConfig;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
@@ -67,6 +68,19 @@ public record BrokerSettings(
 
         public QueueDefaults {
             priorityLevels = List.copyOf(priorityLevels);
+        }
+
+        /** A new queue's settings before the create request overrides any of them. */
+        public QueueConfig.Builder builder(String queueName) {
+            return QueueConfig.builder(queueName)
+                    .priorityLevels(priorityLevels)
+                    .visibilityTimeout(visibilityTimeout)
+                    .maxRetries(maxRetries)
+                    .defaultTtl(defaultTtl)
+                    .shards(shards)
+                    .replicationFactor(replicationFactor)
+                    .minInSyncReplicas(minInSyncReplicas)
+                    .uncleanLeaderElection(uncleanLeaderElection);
         }
 
         @AssertTrue(message = "priority level names must be unique")

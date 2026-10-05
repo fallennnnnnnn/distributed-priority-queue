@@ -13,7 +13,7 @@ Implementation plan for the design in [README.md](README.md).
 
 - [x] **0.1** Initialise the git repository. (S)
 - [x] **0.2** Dependencies: web, validation, actuator, Prometheus registry, etcd client (jetcd), grpc-java and the protobuf Gradle plugin; for tests, Awaitility and Testcontainers. gRPC and protobuf versions come from the Spring Boot BOM, which also moves the gRPC that jetcd brings onto the same version. *Done when* `./gradlew build` passes. (S)
-- [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `api`, `metrics`, `demo`. (S)
+- [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `api`, `metrics`, `demo`, `exception`. (S)
 - [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the four broker settings from README section 7. Validated at startup. (S)
 - [x] **0.5** Injectable clock for all time-dependent code, plus a manual clock for tests. (S)
 
@@ -47,17 +47,17 @@ Implementation plan for the design in [README.md](README.md).
 
 ## Phase 2 — Single-broker service: sharding, API, metrics
 
-- [ ] **2.1** `Coordinator` interface and `InMemoryCoordinator`: brokers with incarnations and leases that tests can expire, queue configs, versioned shard state with compare-and-swap, watches. A single broker runs as a cluster of one. (M)
-- [ ] **2.2** Queue creation: validate settings, assign replicas, write config and shard states in one transaction; brokers create local replicas from watched metadata. (M)
-- [ ] **2.3** Router: enqueue shard choice (`shardKey` hash or round-robin), ack routing by message ID, dequeue shard order by highest ready priority. (M)
-- [ ] **2.4** Sweeper thread that runs `reclaim` on led shards every `sweeperInterval`. (S)
-- [ ] **2.5** Public REST API: create, describe, update settings, enqueue, dequeue, ack, dead-letter listing; request validation; error mapping (400, 404, 409, 503). (M)
-- [ ] **2.6** `waitTime` long poll on dequeue. (S)
-- [ ] **2.7** Metrics: Micrometer binder labelled by queue, shard and priority; JSON `GET /queues/{name}/metrics`. (M)
-- [ ] **2.8** Sharding tests: same `shardKey` lands on one shard and keeps FIFO; round-robin spreads evenly; `shards = 1` is strictly ordered; a HIGH message in any shard is delivered before a LOW one. (S)
-- [ ] **2.9** HTTP tests for every endpoint and error code. (M)
-- [ ] **2.10** Producer / consumer harness against one broker: concurrent producers and consumers, some consumers skipping acks; prints the invariants and metrics. (M)
-- [ ] **2.11** Single-broker stack: `./gradlew bootRun` starts one broker with the in-memory coordinator and no other process, and a queue created with default settings works on it. *Done when* the harness from 2.10 passes against it. (S)
+- [x] **2.1** `Coordinator` interface and `InMemoryCoordinator`: brokers with incarnations and leases that tests can expire, queue configs, versioned shard state with compare-and-swap, watches. A single broker runs as a cluster of one. (M)
+- [x] **2.2** Queue creation: validate settings, assign replicas, write config and shard states in one transaction; brokers create local replicas from watched metadata. (M)
+- [x] **2.3** Router: enqueue shard choice (`shardKey` hash or round-robin), ack routing by message ID, dequeue shard order by highest ready priority. (M)
+- [x] **2.4** Sweeper thread that runs `reclaim` on led shards every `sweeperInterval`. (S)
+- [x] **2.5** Public REST API: create, describe, update settings, enqueue, dequeue, ack, dead-letter listing; request validation; error mapping (400, 404, 409, 503). (M)
+- [x] **2.6** `waitTime` long poll on dequeue. (S)
+- [x] **2.7** Metrics: Micrometer binder labelled by queue, shard and priority; JSON `GET /queues/{name}/metrics`. (M)
+- [x] **2.8** Sharding tests: same `shardKey` lands on one shard and keeps FIFO; round-robin spreads evenly; `shards = 1` is strictly ordered; a HIGH message in any shard is delivered before a LOW one. (S)
+- [x] **2.9** HTTP tests for every endpoint and error code. (M)
+- [x] **2.10** Producer / consumer harness against one broker: concurrent producers and consumers, some consumers skipping acks; prints the invariants and metrics. (M)
+- [x] **2.11** Single-broker stack: `./gradlew bootRun` starts one broker with the in-memory coordinator and no other process, and a queue created with default settings works on it. *Done when* the harness from 2.10 passes against it. (S)
 
 **Exit:** every FR, metric and deliverable in the original spec is met by one broker.
 

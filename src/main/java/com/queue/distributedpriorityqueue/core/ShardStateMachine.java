@@ -170,6 +170,16 @@ public final class ShardStateMachine {
         return Optional.ofNullable(message).map(Message::view);
     }
 
+    /** The rank of the highest priority that has a ready message, or -1 when nothing is ready. */
+    public int highestReadyRank() {
+        for (int rank = 0; rank < lanes.size(); rank++) {
+            if (!lanes.get(rank).isEmpty()) {
+                return rank;
+            }
+        }
+        return -1;
+    }
+
     /** Ready and in-flight messages, oldest first. */
     public List<MessageView> liveMessages() {
         return live.values().stream()

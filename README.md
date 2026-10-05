@@ -1,8 +1,31 @@
 # Distributed Priority Queue Service
 
-> **Status:** design settled, implementation not started. This README describes the design being
-> built. Progress is tracked in [WORK_ITEMS.md](WORK_ITEMS.md). Run instructions and measured
-> results will be added as the phases land.
+> **Status:** phases 0 to 2 of [WORK_ITEMS.md](WORK_ITEMS.md) are done. One broker meets the
+> original spec: priority queues, at-least-once delivery, retries, dead-lettering, metrics, the
+> REST API and a producer / consumer harness. Replication, leader election and the multi-broker
+> stacks (phases 3 to 5) are designed below and not built yet.
+
+## Running it
+
+Needs JDK 17. Start one broker on port 8080:
+
+```bash
+./gradlew bootRun
+```
+
+In another terminal, run producers and consumers against it. They enqueue 2000 messages, skip
+20% of the acknowledgements, and check at the end that every message was acknowledged or
+dead-lettered:
+
+```bash
+./gradlew harness --args="--url=http://localhost:8080"
+```
+
+Run the tests:
+
+```bash
+./gradlew test
+```
 
 ## 1. Problem summary
 
@@ -120,6 +143,9 @@ Inside a broker, a request passes through four layers:
 REST API ──▶ Router ──▶ Shard replica (leader) ──▶ log ──▶ state machine
                └─ forwards to another broker when that broker leads the shard
 ```
+
+Each package has a short README with pictures. Start at the
+[code map](src/main/java/com/queue/distributedpriorityqueue/README.md).
 
 | Term | Meaning |
 |---|---|
@@ -244,6 +270,15 @@ What the coordinator stores:
 | Dead letters | `GET /queues/{name}/dlq` | The dead-lettered messages |
 | Prometheus | `GET /actuator/prometheus` | Text exposition |
 
+Request details:
+
+- **Durations** are in milliseconds: `visibilityTimeoutMs`, `defaultTtlMs`, `ttlMs`, `waitTimeMs`.
+- **Create** takes `name` plus any queue setting from section 7; a setting left out takes the broker's default.
+- **Update** changes only the settings given. A `defaultTtlMs` of 0 removes the default TTL.
+- **Enqueue** takes `payload`, and optionally `priority`, `shardKey`, and either `ttlMs` or `expiresAt`.
+- **Dequeue** takes an optional `waitTimeMs` query parameter, at most 20 000. A waiting dequeue looks again every 50 ms and holds no request thread while it waits.
+- **Errors** are returned as problem-detail JSON with `status` and `detail`.
+
 Clients use REST. Brokers talk to each other over gRPC, served by a plain grpc-java server on its
 own port, with messages defined in protobuf:
 
@@ -339,6 +374,23 @@ against its own clock, so clock skew between brokers can make a redelivery sligh
 | M-3 | Messages in flight | Per queue: messages dequeued but not yet acknowledged. |
 | M-4 | Throughput | Per queue: messages enqueued per second and messages acknowledged per second. |
 | M-5 | Failures / DLQ | Per queue: count of messages moved to the dead-letter queue. |
+
+Each broker exports these at `/actuator/prometheus` for the shards it leads, labelled with
+`queue` and `shard`. Prometheus adds them up per queue with `sum by (queue)`, and takes
+`max by (queue)` for the oldest message age.
+
+| Prometheus metric | Type | Covers |
+|---|---|---|
+| `dpq_oldest_message_age_seconds` | gauge | M-1 |
+| `dpq_messages_ready`, also labelled with `priority` | gauge | M-2 |
+| `dpq_messages_in_flight` | gauge | M-3 |
+| `dpq_messages_enqueued_total`, `dpq_messages_acked_total` | counter | M-4, through `rate()` |
+| `dpq_messages_enqueued_per_second`, `dpq_messages_acked_per_second` | gauge | M-4, averaged over the last 60 seconds |
+| `dpq_messages_dead_lettered_total` | counter | M-5 |
+| `dpq_dead_letters` | gauge | Dead letters currently held |
+| `dpq_messages_delivered_total`, `dpq_messages_redelivered_total`, `dpq_messages_expired_total` | counter | Deliveries, redeliveries and TTL expiries |
+
+`GET /queues/{name}/metrics` returns the same numbers as JSON, already summed over the queue's shards.
 
 The cluster adds replication metrics: in-sync replica count per shard, under-replicated shards,
 leader epoch, log end offset, high watermark, leader elections and shard resets.

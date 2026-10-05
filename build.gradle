@@ -60,6 +60,17 @@ protobuf {
     }
 }
 
+springBoot {
+    mainClass = 'com.queue.distributedpriorityqueue.DistributedPriorityQueueApplication'
+}
+
+tasks.register('harness', JavaExec) {
+    group = 'application'
+    description = 'Runs producers and consumers against a running broker and checks nothing was lost.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.queue.distributedpriorityqueue.demo.QueueHarness'
+}
+
 tasks.named('test') {
     useJUnitPlatform()
 }
