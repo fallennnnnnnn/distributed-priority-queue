@@ -216,6 +216,16 @@ class QueueApiTest {
         }
 
         @Test
+        void acceptsEitherAcksLevel() throws Exception {
+            createQueue("{}");
+
+            assertThat(enqueue("{\"payload\":\"a\",\"acks\":\"leader\"}").statusCode()).isEqualTo(201);
+            assertThat(enqueue("{\"payload\":\"b\",\"acks\":\"ALL\"}").statusCode()).isEqualTo(201);
+            assertProblem(enqueue("{\"payload\":\"c\",\"acks\":\"some\"}"), 400, "acks");
+            assertThat(json(get("/queues/" + queue + "/metrics")).get("enqueuedTotal").asLong()).isEqualTo(2);
+        }
+
+        @Test
         void aMessageIsNotDeliveredAfterItsTtl() throws Exception {
             createQueue("{}");
             enqueue("{\"payload\":\"short\",\"ttlMs\":10000}");

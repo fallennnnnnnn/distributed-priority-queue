@@ -38,22 +38,22 @@ final class ClusterMetadata {
     }
 
     Optional<QueueMetadata> refresh(String queue) {
-        Optional<Versioned<QueueConfig>> config = coordinator.queue(queue);
-        if (config.isEmpty()) {
+        Optional<Versioned<QueueConfig>> settings = coordinator.queue(queue);
+        if (settings.isEmpty()) {
             return Optional.empty();
         }
-        List<ShardState> shards = new ArrayList<>();
-        for (int shard = 0; shard < config.get().value().shards(); shard++) {
+        List<Versioned<ShardState>> shards = new ArrayList<>();
+        for (int shard = 0; shard < settings.get().value().shards(); shard++) {
             Optional<Versioned<ShardState>> state = coordinator.shard(new ShardId(queue, shard));
             if (state.isEmpty()) {
                 return Optional.empty();
             }
-            shards.add(state.get().value());
+            shards.add(state.get());
         }
-        QueueMetadata read = new QueueMetadata(config.get().value(), config.get().version(), shards);
-        // Two refreshes can finish out of order; keep whichever read the newer settings.
+        QueueMetadata read = new QueueMetadata(settings.get(), shards);
+        // Two refreshes can finish out of order; keep whichever saw the later changes.
         QueueMetadata newest = queues.merge(queue, read,
-                (cached, fresh) -> fresh.version() >= cached.version() ? fresh : cached);
+                (cached, fresh) -> fresh.revision() >= cached.revision() ? fresh : cached);
         onRefresh.accept(newest);
         return Optional.of(newest);
     }

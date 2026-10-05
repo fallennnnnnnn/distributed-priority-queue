@@ -10,9 +10,12 @@ import com.queue.distributedpriorityqueue.core.MessageId;
 import com.queue.distributedpriorityqueue.core.MessageView;
 import com.queue.distributedpriorityqueue.core.QueueConfig;
 import com.queue.distributedpriorityqueue.core.ShardMetrics;
+import com.queue.distributedpriorityqueue.exception.BrokerUnreachableException;
+import com.queue.distributedpriorityqueue.exception.NotLeaderException;
 import com.queue.distributedpriorityqueue.exception.QueueAlreadyExistsException;
 import com.queue.distributedpriorityqueue.exception.QueueNotFoundException;
 import com.queue.distributedpriorityqueue.exception.ShardUnavailableException;
+import com.queue.distributedpriorityqueue.replication.Acks;
 import com.queue.distributedpriorityqueue.replication.ShardReplica;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -21,13 +24,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
- * Everything a client can ask of a queue. Each request is routed to a shard and carried out by
- * that shard's leader replica.
+ * Everything a client can ask of a queue, on any broker. Each request is routed to a shard and
+ * carried out by that shard's leader: directly when this broker leads the shard, otherwise by
+ * passing the request to the broker that does.
  */
 public final class QueueService {
 
@@ -39,17 +45,24 @@ public final class QueueService {
 
     private static final int UPDATE_ATTEMPTS = 10;
 
+    private final ReplicaId self;
     private final Coordinator coordinator;
     private final ClusterMetadata metadata;
     private final LocalShards localShards;
+    private final Peers peers;
+    /** What other brokers last said about the ready messages of the shards they lead. */
+    private final Map<ShardId, Integer> remoteReadyRanks;
     private final Router router;
     private final ScheduledExecutorService scheduler;
 
-    QueueService(Coordinator coordinator, ClusterMetadata metadata, LocalShards localShards, Router router,
-            ScheduledExecutorService scheduler) {
+    QueueService(ReplicaId self, Coordinator coordinator, ClusterMetadata metadata, LocalShards localShards,
+            Peers peers, Map<ShardId, Integer> remoteReadyRanks, Router router, ScheduledExecutorService scheduler) {
+        this.self = self;
         this.coordinator = coordinator;
         this.metadata = metadata;
         this.localShards = localShards;
+        this.peers = peers;
+        this.remoteReadyRanks = remoteReadyRanks;
         this.router = router;
         this.scheduler = scheduler;
     }
@@ -95,10 +108,17 @@ public final class QueueService {
      * @param shardKey messages with the same key keep their order; null spreads messages evenly
      */
     public CompletableFuture<MessageId> enqueue(String queue, String payload, String priority, Duration ttl,
-            String shardKey) {
+            String shardKey, Acks acks) {
         QueueConfig config = require(queue).config();
-        int shard = router.shardForEnqueue(config, shardKey);
-        return leader(queue, shard).enqueue(payload, priority, ttl);
+        ShardId shard = new ShardId(queue, router.shardForEnqueue(config, shardKey));
+        return onLeader(shard,
+                replica -> replica.enqueue(payload, priority, ttl, acks),
+                broker -> broker.enqueue(shard, payload, priority, ttl, acks));
+    }
+
+    public CompletableFuture<MessageId> enqueue(String queue, String payload, String priority, Duration ttl,
+            String shardKey) {
+        return enqueue(queue, payload, priority, ttl, shardKey, Acks.ALL);
     }
 
     /**
@@ -121,11 +141,149 @@ public final class QueueService {
         if (id.shard() >= config.shards()) {
             return CompletableFuture.completedFuture(false);
         }
-        return leader(queue, id.shard()).ack(id);
+        ShardId shard = new ShardId(queue, id.shard());
+        return onLeader(shard, replica -> replica.ack(id), broker -> broker.ack(shard, id));
     }
 
-    public QueueMetrics metrics(String queue) {
+    public CompletableFuture<QueueMetrics> metrics(String queue) {
         QueueConfig config = require(queue).config();
+        return fromEveryShard(config,
+                replica -> CompletableFuture.completedFuture(replica.metrics()),
+                BrokerApi::metrics)
+                .thenApply(perShard -> sum(config, perShard));
+    }
+
+    public CompletableFuture<List<MessageView>> deadLetters(String queue) {
+        QueueConfig config = require(queue).config();
+        return fromEveryShard(config,
+                replica -> CompletableFuture.completedFuture(replica.deadLetters()),
+                BrokerApi::deadLetters)
+                .thenApply(perShard -> perShard.stream().flatMap(List::stream).toList());
+    }
+
+    private void dequeueUntil(String queue, long deadlineNanos, CompletableFuture<Optional<MessageView>> result) {
+        dequeueOnce(queue).whenComplete((message, error) -> {
+            long remaining = deadlineNanos - System.nanoTime();
+            if (error != null) {
+                result.completeExceptionally(unwrap(error));
+            } else if (message.isPresent() || remaining <= 0) {
+                result.complete(message);
+            } else {
+                scheduler.schedule(() -> dequeueUntil(queue, deadlineNanos, result),
+                        Math.min(remaining, WAIT_RETRY.toNanos()), TimeUnit.NANOSECONDS);
+            }
+        });
+    }
+
+    /**
+     * Tries the shards in the router's order and stops at the first that has a message. A shard
+     * whose leader cannot be reached is passed over, so that the others can still be consumed;
+     * the dequeue fails only if no shard could be asked.
+     */
+    private CompletableFuture<Optional<MessageView>> dequeueOnce(String queue) {
+        QueueConfig config;
+        try {
+            config = require(queue).config();
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+        List<Integer> order = router.dequeueOrder(config, shard -> readyRank(new ShardId(queue, shard)));
+        DequeueAttempt attempt = new DequeueAttempt();
+        CompletableFuture<Optional<MessageView>> result = CompletableFuture.completedFuture(Optional.empty());
+        for (int number : order) {
+            ShardId shard = new ShardId(queue, number);
+            result = result.thenCompose(found -> found.isPresent()
+                    ? CompletableFuture.completedFuture(found)
+                    : onLeader(shard, ShardReplica::dequeue, broker -> broker.dequeue(shard))
+                            .handle((message, error) -> attempt.record(shard, message, error)));
+        }
+        return result.thenApply(found -> {
+            if (found.isEmpty() && attempt.answered == 0 && attempt.unavailable != null) {
+                throw attempt.unavailable;
+            }
+            return found;
+        });
+    }
+
+    /** What a dequeue learned from the shards it has asked so far. */
+    private final class DequeueAttempt {
+
+        private int answered;
+        private RuntimeException unavailable;
+
+        Optional<MessageView> record(ShardId shard, Optional<MessageView> message, Throwable error) {
+            if (error == null) {
+                answered++;
+                if (message.isEmpty()) {
+                    remoteReadyRanks.computeIfPresent(shard, (id, rank) -> -1);
+                }
+                return message;
+            }
+            Throwable cause = unwrap(error);
+            if (cause instanceof ShardUnavailableException || cause instanceof BrokerUnreachableException
+                    || cause instanceof NotLeaderException) {
+                unavailable = (RuntimeException) cause;
+                return Optional.empty();
+            }
+            throw cause instanceof RuntimeException runtime ? runtime : new CompletionException(cause);
+        }
+    }
+
+    private int readyRank(ShardId shard) {
+        Optional<ShardReplica> local = localShards.find(shard).filter(ShardReplica::isLeader);
+        return local.map(ShardReplica::highestReadyRank).orElseGet(() -> remoteReadyRanks.getOrDefault(shard, -1));
+    }
+
+    private QueueMetadata require(String queue) {
+        return metadata.find(queue).orElseThrow(() -> new QueueNotFoundException(queue));
+    }
+
+    /**
+     * Carries out a request on the shard's leader. If the broker asked turns out not to lead the
+     * shard, the metadata is read again and the request is tried once more on the leader it names.
+     */
+    private <T> CompletableFuture<T> onLeader(ShardId shard, Function<ShardReplica, CompletableFuture<T>> local,
+            Function<BrokerApi, CompletableFuture<T>> remote) {
+        return attemptOnLeader(shard, local, remote).exceptionallyCompose(error -> {
+            if (!(unwrap(error) instanceof NotLeaderException)) {
+                return CompletableFuture.failedFuture(unwrap(error));
+            }
+            metadata.refresh(shard.queue());
+            return attemptOnLeader(shard, local, remote);
+        });
+    }
+
+    private <T> CompletableFuture<T> attemptOnLeader(ShardId shard,
+            Function<ShardReplica, CompletableFuture<T>> local, Function<BrokerApi, CompletableFuture<T>> remote) {
+        try {
+            ReplicaId leader = require(shard.queue()).shard(shard.shard()).leader();
+            if (leader == null) {
+                throw new ShardUnavailableException(shard);
+            }
+            if (leader.equals(self)) {
+                return local.apply(localShards.find(shard).orElseThrow(() -> new NotLeaderException(shard)));
+            }
+            BrokerApi broker = peers.find(leader).orElseThrow(() -> new ShardUnavailableException(shard));
+            return remote.apply(broker);
+        } catch (RuntimeException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    /** Asks the leader of every shard of the queue, and gathers the answers in shard order. */
+    private <T> CompletableFuture<List<T>> fromEveryShard(QueueConfig config,
+            Function<ShardReplica, CompletableFuture<T>> local,
+            java.util.function.BiFunction<BrokerApi, ShardId, CompletableFuture<T>> remote) {
+        List<CompletableFuture<T>> answers = new ArrayList<>(config.shards());
+        for (int number = 0; number < config.shards(); number++) {
+            ShardId shard = new ShardId(config.name(), number);
+            answers.add(onLeader(shard, local, broker -> remote.apply(broker, shard)));
+        }
+        return CompletableFuture.allOf(answers.toArray(CompletableFuture[]::new))
+                .thenApply(done -> answers.stream().map(CompletableFuture::join).toList());
+    }
+
+    private static QueueMetrics sum(QueueConfig config, List<ShardMetrics> perShard) {
         long[] ready = new long[config.priorityLevels().size()];
         long inFlight = 0;
         Duration oldest = Duration.ZERO;
@@ -138,8 +296,7 @@ public final class QueueService {
         long expired = 0;
         double enqueuedPerSecond = 0;
         double ackedPerSecond = 0;
-        for (int shard = 0; shard < config.shards(); shard++) {
-            ShardMetrics metrics = leader(queue, shard).metrics();
+        for (ShardMetrics metrics : perShard) {
             for (int rank = 0; rank < ready.length; rank++) {
                 ready[rank] += metrics.readyByPriority().get(rank);
             }
@@ -161,61 +318,13 @@ public final class QueueService {
             readyByLevel.put(config.levelName(rank), ready[rank]);
             readyTotal += ready[rank];
         }
-        return new QueueMetrics(queue, readyByLevel, readyTotal, inFlight, oldest.toMillis() / 1000.0, deadLetters,
-                enqueued, delivered, redelivered, acked, deadLettered, expired, enqueuedPerSecond, ackedPerSecond);
+        return new QueueMetrics(config.name(), readyByLevel, readyTotal, inFlight, oldest.toMillis() / 1000.0,
+                deadLetters, enqueued, delivered, redelivered, acked, deadLettered, expired, enqueuedPerSecond,
+                ackedPerSecond);
     }
 
-    public List<MessageView> deadLetters(String queue) {
-        QueueConfig config = require(queue).config();
-        List<MessageView> deadLetters = new ArrayList<>();
-        for (int shard = 0; shard < config.shards(); shard++) {
-            deadLetters.addAll(leader(queue, shard).deadLetters());
-        }
-        return deadLetters;
-    }
-
-    private void dequeueUntil(String queue, long deadlineNanos, CompletableFuture<Optional<MessageView>> result) {
-        CompletableFuture<Optional<MessageView>> attempt;
-        try {
-            attempt = dequeueOnce(queue);
-        } catch (RuntimeException e) {
-            result.completeExceptionally(e);
-            return;
-        }
-        attempt.whenComplete((message, error) -> {
-            long remaining = deadlineNanos - System.nanoTime();
-            if (error != null) {
-                result.completeExceptionally(error);
-            } else if (message.isPresent() || remaining <= 0) {
-                result.complete(message);
-            } else {
-                scheduler.schedule(() -> dequeueUntil(queue, deadlineNanos, result),
-                        Math.min(remaining, WAIT_RETRY.toNanos()), TimeUnit.NANOSECONDS);
-            }
-        });
-    }
-
-    /** Tries the shards in the router's order and stops at the first that has a message. */
-    private CompletableFuture<Optional<MessageView>> dequeueOnce(String queue) {
-        QueueConfig config = require(queue).config();
-        List<Integer> order = router.dequeueOrder(config, shard -> localShards.find(new ShardId(queue, shard))
-                .map(ShardReplica::highestReadyRank)
-                .orElse(-1));
-        CompletableFuture<Optional<MessageView>> result = CompletableFuture.completedFuture(Optional.empty());
-        for (int shard : order) {
-            result = result.thenCompose(found ->
-                    found.isPresent() ? CompletableFuture.completedFuture(found) : leader(queue, shard).dequeue());
-        }
-        return result;
-    }
-
-    private QueueMetadata require(String queue) {
-        return metadata.find(queue).orElseThrow(() -> new QueueNotFoundException(queue));
-    }
-
-    private ShardReplica leader(String queue, int shard) {
-        ShardId id = new ShardId(queue, shard);
-        return localShards.find(id).orElseThrow(() -> new ShardUnavailableException(id));
+    private static Throwable unwrap(Throwable error) {
+        return error instanceof CompletionException && error.getCause() != null ? error.getCause() : error;
     }
 
     /**

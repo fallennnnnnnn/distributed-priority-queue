@@ -61,7 +61,7 @@ final class ApiModel {
             QueueConfig config = metadata.config();
             List<ShardResponse> shardStates = new ArrayList<>();
             for (int shard = 0; shard < metadata.shards().size(); shard++) {
-                shardStates.add(ShardResponse.of(shard, metadata.shards().get(shard)));
+                shardStates.add(ShardResponse.of(shard, metadata.shard(shard)));
             }
             return new QueueResponse(config.name(), config.priorityLevels(), config.visibilityTimeout().toMillis(),
                     config.maxRetries(), config.defaultTtl() == null ? null : config.defaultTtl().toMillis(),
@@ -79,8 +79,12 @@ final class ApiModel {
         }
     }
 
-    /** Give {@code ttlMs} or {@code expiresAt}, not both. Neither means the queue's default TTL. */
-    record EnqueueRequest(String payload, String priority, Long ttlMs, Instant expiresAt, String shardKey) {
+    /**
+     * Give {@code ttlMs} or {@code expiresAt}, not both; neither means the queue's default TTL.
+     * {@code acks} is {@code all} (the default) or {@code leader}.
+     */
+    record EnqueueRequest(String payload, String priority, Long ttlMs, Instant expiresAt, String shardKey,
+            String acks) {
     }
 
     record EnqueueResponse(String messageId) {

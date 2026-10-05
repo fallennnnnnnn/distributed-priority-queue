@@ -3,6 +3,7 @@ package com.queue.distributedpriorityqueue.coordination;
 import com.queue.distributedpriorityqueue.core.QueueConfig;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * The cluster's shared, consistent metadata: which brokers are alive, which queues exist and, for
@@ -33,8 +34,11 @@ public interface Coordinator extends AutoCloseable {
 
     Optional<Versioned<ShardState>> shard(ShardId id);
 
-    /** False if the shard's state changed since {@code expectedVersion} was read. */
-    boolean updateShard(ShardId id, long expectedVersion, ShardState state);
+    /**
+     * Replaces a shard's state and returns its new version. Empty, with nothing changed, if the
+     * state changed since {@code expectedVersion} was read.
+     */
+    OptionalLong updateShard(ShardId id, long expectedVersion, ShardState state);
 
     /** Reports every change from now on, in order. Events name what changed; listeners read the new value. */
     Subscription watch(Listener listener);

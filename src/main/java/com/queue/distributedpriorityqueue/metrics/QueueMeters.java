@@ -14,7 +14,8 @@ import java.util.function.ToDoubleFunction;
 import org.springframework.stereotype.Component;
 
 /**
- * Publishes each shard's numbers as meters tagged with queue, shard and priority level. Prometheus
+ * Publishes the numbers of each shard this broker leads, as meters tagged with queue, shard and
+ * priority level. Followers publish nothing, so no message is counted twice. Prometheus
  * adds them up per queue with {@code sum by (queue)}, and takes {@code max by (queue)} for the
  * oldest message age.
  */
@@ -30,7 +31,7 @@ class QueueMeters {
 
     QueueMeters(MeterRegistry registry, Broker broker) {
         this.registry = registry;
-        broker.onReplicaCreated(this::bind);
+        broker.onLeading(this::bind);
     }
 
     private void bind(ShardReplica replica) {

@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 
 import com.queue.distributedpriorityqueue.core.QueueConfig;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -108,7 +109,7 @@ class InMemoryCoordinatorTest {
         assertThat(coordinator.queue("nope")).isEmpty();
         assertThat(coordinator.shard(new ShardId("nope", 0))).isEmpty();
         assertThat(coordinator.updateQueue("nope", 1, QueueConfig.builder("nope").build())).isFalse();
-        assertThat(coordinator.updateShard(new ShardId("nope", 0), 1, state("a", 0))).isFalse();
+        assertThat(coordinator.updateShard(new ShardId("nope", 0), 1, state("a", 0))).isEmpty();
     }
 
     @Test
@@ -130,12 +131,12 @@ class InMemoryCoordinatorTest {
         coordinator.createQueue(QueueConfig.builder("orders").build(), List.of(state("a", 0)));
         long version = coordinator.shard(SHARD).orElseThrow().version();
 
-        boolean first = coordinator.updateShard(SHARD, version, state("b", 1));
-        boolean second = coordinator.updateShard(SHARD, version, state("c", 1));
+        OptionalLong first = coordinator.updateShard(SHARD, version, state("b", 1));
+        OptionalLong second = coordinator.updateShard(SHARD, version, state("c", 1));
 
-        assertThat(first).isTrue();
-        assertThat(second).isFalse();
-        assertThat(coordinator.shard(SHARD)).map(Versioned::value).contains(state("b", 1));
+        assertThat(first).isPresent();
+        assertThat(second).isEmpty();
+        assertThat(coordinator.shard(SHARD)).contains(new Versioned<>(state("b", 1), first.getAsLong()));
     }
 
     @Test

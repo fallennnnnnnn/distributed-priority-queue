@@ -29,6 +29,7 @@ public record BrokerSettings(
         @DefaultValue @Valid QueueDefaults queueDefaults,
         @DefaultValue("5s") @DurationMin(millis = 1) Duration failureDetectionTimeout,
         @DefaultValue("5s") @DurationMin(millis = 1) Duration replicaLagMax,
+        @DefaultValue("10s") @DurationMin(millis = 1) Duration commitTimeout,
         @DefaultValue("100ms") @DurationMin(millis = 1) Duration sweeperInterval,
         @DefaultValue("200ms") @DurationMin(millis = 1) Duration summaryInterval) {
 

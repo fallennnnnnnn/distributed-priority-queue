@@ -57,7 +57,7 @@ class ShardReplicaConcurrencyTest {
 
     @RepeatedTest(5)
     void noMessageIsLostOrHeldByTwoConsumersAtOnce() throws Exception {
-        ShardReplica replica = new ShardReplica(0,
+        ShardReplica replica = ShardReplica.standalone(0,
                 QueueConfig.builder("orders").visibilityTimeout(Duration.ofHours(1)).build(),
                 new InMemoryShardLog(), Clock.systemUTC());
         Set<MessageId> held = ConcurrentHashMap.newKeySet();
@@ -112,7 +112,7 @@ class ShardReplicaConcurrencyTest {
         ManualClock clock = new ManualClock();
         int maxRetries = 2;
         Duration visibility = Duration.ofSeconds(30);
-        ShardReplica replica = new ShardReplica(0,
+        ShardReplica replica = ShardReplica.standalone(0,
                 QueueConfig.builder("orders").visibilityTimeout(visibility).maxRetries(maxRetries).build(),
                 new InMemoryShardLog(), clock);
         AtomicBoolean done = new AtomicBoolean();
@@ -158,7 +158,7 @@ class ShardReplicaConcurrencyTest {
     void anAckRacingTheVisibilityTimeoutLeavesAConsistentState(RepetitionInfo repetition) throws Exception {
         ManualClock clock = new ManualClock();
         Duration visibility = Duration.ofSeconds(30);
-        ShardReplica replica = new ShardReplica(0,
+        ShardReplica replica = ShardReplica.standalone(0,
                 QueueConfig.builder("orders").visibilityTimeout(visibility).build(), new InMemoryShardLog(), clock);
         MessageId id = replica.enqueue("a", "HIGH", null).join();
         replica.dequeue().join();

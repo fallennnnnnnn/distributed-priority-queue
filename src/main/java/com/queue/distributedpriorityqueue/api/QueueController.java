@@ -13,6 +13,7 @@ import com.queue.distributedpriorityqueue.cluster.QueueService;
 import com.queue.distributedpriorityqueue.core.MessageId;
 import com.queue.distributedpriorityqueue.core.QueueConfig;
 import com.queue.distributedpriorityqueue.exception.MessageNotFoundException;
+import com.queue.distributedpriorityqueue.replication.Acks;
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
@@ -112,7 +113,8 @@ class QueueController {
     @PostMapping("/{queue}/messages")
     CompletableFuture<ResponseEntity<EnqueueResponse>> enqueue(@PathVariable String queue,
             @RequestBody EnqueueRequest request) {
-        return queues.enqueue(queue, request.payload(), request.priority(), timeToLive(request), request.shardKey())
+        return queues.enqueue(queue, request.payload(), request.priority(), timeToLive(request), request.shardKey(),
+                        acks(request))
                 .thenApply(id -> ResponseEntity
                         .created(URI.create("/queues/" + queue + "/messages/" + id))
                         .body(new EnqueueResponse(id.toString())));
@@ -137,14 +139,25 @@ class QueueController {
     }
 
     @GetMapping("/{queue}/metrics")
-    QueueMetrics metrics(@PathVariable String queue) {
+    CompletableFuture<QueueMetrics> metrics(@PathVariable String queue) {
         return queues.metrics(queue);
     }
 
     @GetMapping("/{queue}/dlq")
-    List<MessageResponse> deadLetters(@PathVariable String queue) {
+    CompletableFuture<List<MessageResponse>> deadLetters(@PathVariable String queue) {
         QueueConfig config = queues.describe(queue).config();
-        return queues.deadLetters(queue).stream().map(message -> MessageResponse.of(message, config)).toList();
+        return queues.deadLetters(queue).thenApply(
+                deadLetters -> deadLetters.stream().map(message -> MessageResponse.of(message, config)).toList());
+    }
+
+    private static Acks acks(EnqueueRequest request) {
+        if (request.acks() == null || request.acks().equalsIgnoreCase("all")) {
+            return Acks.ALL;
+        }
+        if (request.acks().equalsIgnoreCase("leader")) {
+            return Acks.LEADER;
+        }
+        throw new IllegalArgumentException("acks must be 'all' or 'leader'");
     }
 
     private Duration timeToLive(EnqueueRequest request) {

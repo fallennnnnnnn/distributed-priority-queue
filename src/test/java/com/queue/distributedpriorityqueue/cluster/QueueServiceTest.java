@@ -37,7 +37,7 @@ class QueueServiceTest {
 
     private final ManualClock clock = new ManualClock();
     private final InMemoryCoordinator coordinator = new InMemoryCoordinator();
-    private final Broker broker = new Broker(TestBrokers.settings("broker-1", 8080), coordinator, clock);
+    private final Broker broker = new Broker(TestBrokers.settings("broker-1", 8080), coordinator, BrokerTransport.NONE, clock);
     private final QueueService queues = broker.queues();
 
     @BeforeEach
@@ -60,7 +60,8 @@ class QueueServiceTest {
 
             assertThat(created.config().name()).isEqualTo("orders");
             assertThat(created.shards()).hasSize(3);
-            for (ShardState shard : created.shards()) {
+            for (int number = 0; number < 3; number++) {
+                ShardState shard = created.shard(number);
                 assertThat(shard.leader()).isEqualTo(broker.info().replicaId());
                 assertThat(shard.epoch()).isZero();
                 assertThat(shard.isr()).containsExactly(broker.info().replicaId());
@@ -237,7 +238,7 @@ class QueueServiceTest {
             assertThat(delivered).allSatisfy(id -> assertThat(queues.ack("orders", id).join()).isTrue());
 
             assertThat(queues.ack("orders", new MessageId(9, 0)).join()).isFalse();
-            assertThat(queues.metrics("orders").ackedTotal()).isEqualTo(4);
+            assertThat(queues.metrics("orders").join().ackedTotal()).isEqualTo(4);
         }
     }
 
@@ -256,7 +257,7 @@ class QueueServiceTest {
             MessageView first = dequeue("orders").orElseThrow();
             queues.ack("orders", first.id()).join();
 
-            QueueMetrics metrics = queues.metrics("orders");
+            QueueMetrics metrics = queues.metrics("orders").join();
 
             assertThat(first.payload()).isEqualTo("h");
             assertThat(metrics.queue()).isEqualTo("orders");
@@ -283,9 +284,9 @@ class QueueServiceTest {
             clock.advance(VISIBILITY);
 
             assertThat(dequeue("orders")).isEmpty();
-            assertThat(queues.deadLetters("orders")).extracting(MessageView::payload).containsExactlyInAnyOrder(
+            assertThat(queues.deadLetters("orders").join()).extracting(MessageView::payload).containsExactlyInAnyOrder(
                     "poison-0", "poison-1", "poison-2", "poison-3", "poison-4", "poison-5");
-            QueueMetrics metrics = queues.metrics("orders");
+            QueueMetrics metrics = queues.metrics("orders").join();
             assertThat(metrics.deadLetters()).isEqualTo(6);
             assertThat(metrics.deadLetteredTotal()).isEqualTo(6);
         }
@@ -298,7 +299,7 @@ class QueueServiceTest {
 
         @BeforeEach
         void captureReplicas() {
-            broker.onReplicaCreated(replicas::add);
+            broker.onLeading(replicas::add);
         }
 
         @Test
@@ -318,10 +319,10 @@ class QueueServiceTest {
         @Test
         void theSweeperRunsOnItsOwn() {
             try (InMemoryCoordinator ownCoordinator = new InMemoryCoordinator();
-                    Broker sweeping = new Broker(
-                            TestBrokers.settings("broker-1", 8080, Duration.ofMillis(20)), ownCoordinator, clock)) {
+                    Broker sweeping = new Broker(TestBrokers.settings("broker-1", 8080, Duration.ofMillis(20)),
+                            ownCoordinator, BrokerTransport.NONE, clock)) {
                 List<ShardReplica> sweptReplicas = new CopyOnWriteArrayList<>();
-                sweeping.onReplicaCreated(sweptReplicas::add);
+                sweeping.onLeading(sweptReplicas::add);
                 sweeping.start();
                 sweeping.queues().createQueue(QueueConfig.builder("orders").build());
                 sweeping.queues().enqueue("orders", "a", "HIGH", null, null).join();

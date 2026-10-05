@@ -19,9 +19,15 @@ public class ClusterConfiguration {
         };
     }
 
+    /** Until the gRPC transport is built (work item 5.3), a broker run this way has no peers to reach. */
+    @Bean
+    BrokerTransport brokerTransport() {
+        return BrokerTransport.NONE;
+    }
+
     @Bean(initMethod = "start")
-    Broker broker(BrokerSettings settings, Coordinator coordinator, Clock clock) {
-        return new Broker(settings, coordinator, clock);
+    Broker broker(BrokerSettings settings, Coordinator coordinator, BrokerTransport transport, Clock clock) {
+        return new Broker(settings, coordinator, transport, clock);
     }
 
     @Bean

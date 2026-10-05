@@ -1,9 +1,15 @@
 # Distributed Priority Queue Service
 
-> **Status:** phases 0 to 2 of [WORK_ITEMS.md](WORK_ITEMS.md) are done. One broker meets the
-> original spec: priority queues, at-least-once delivery, retries, dead-lettering, metrics, the
-> REST API and a producer / consumer harness. Replication, leader election and the multi-broker
-> stacks (phases 3 to 5) are designed below and not built yet.
+> **Status:** phases 0 to 3 of [WORK_ITEMS.md](WORK_ITEMS.md) are done.
+>
+> - **Built and runnable:** one broker that meets the original spec: priority queues,
+>   at-least-once delivery, retries, dead-lettering, metrics, the REST API and a producer /
+>   consumer harness.
+> - **Built, and so far run only in tests:** replication between brokers with a fixed leader per
+>   shard: followers, the high watermark, in-sync replica upkeep, and passing requests on to the
+>   leader. The tests run several brokers in one JVM over a network they can break.
+> - **Designed below, not built yet:** leader election and failover (phase 4), and the etcd
+>   coordinator, gRPC transport and docker-compose cluster (phase 5).
 
 ## Running it
 
@@ -211,7 +217,7 @@ event, so followers apply events without reading their own clocks.
 
 - **Enqueue routing:** an optional `shardKey` hashes to a shard, so messages with the same key keep their order. Without a key, enqueues go round-robin.
 - **Message ID:** `{shard}-{offset}`. An acknowledge routes to the right shard without a lookup.
-- **Dequeue routing:** brokers exchange a summary of each shard's ready counts by priority level every 200 ms. A dequeue goes to the shard with the highest ready priority and falls through to the next shard if that one is empty.
+- **Dequeue routing:** every 200 ms each broker asks the others for the highest ready priority of the shards they lead. A dequeue goes to the shard with the highest ready priority and falls through to the next shard if that one is empty. A shard whose leader cannot be reached is passed over, so the rest of the queue can still be consumed.
 - **Any broker:** a client can call any broker; the broker forwards to the shard leader.
 
 ### 6.5 Replication
@@ -234,7 +240,9 @@ Follower  B3   enq  enq  dlv  ack  enq  dlv
 - **Locking:** the leader decides, appends and applies under the shard lock, then waits for the commit outside the lock.
 - **Followers** apply events only up to the high watermark.
 - **ISR upkeep:** the leader removes a follower that has not caught up within `replicaLagMax` and adds it back once it has. The leader writes each change to the coordinator first and uses the new set only after that write succeeds.
-- **Minimum ISR:** when the ISR is smaller than `minInSyncReplicas`, enqueues are rejected with 503. Dequeue and acknowledge keep working so consumers can drain the queue.
+- **Batches:** the leader sends a follower one batch at a time and the next one only when the follower has confirmed the last, so a slow follower never has more than one batch in transit.
+- **Minimum ISR:** when the ISR is smaller than `minInSyncReplicas`, enqueues with `acks=all` are rejected with 503. That includes an enqueue that was still waiting when the ISR shrank below the minimum: it is not reported as safe. Dequeue and acknowledge keep working so consumers can drain the queue.
+- **Commit timeout:** a write that the in-sync followers do not confirm within `commitTimeout` fails with 503. It stays in the leader's log and may still be committed, so a caller that retries can cause a duplicate.
 - **`acks`:** an enqueue with `acks=all` (default) waits for the commit. With `acks=leader` it returns once the leader has appended, which is faster and can lose the message if the leader fails right after.
 
 ### 6.6 Coordinator, election and fencing
@@ -275,7 +283,7 @@ Request details:
 - **Durations** are in milliseconds: `visibilityTimeoutMs`, `defaultTtlMs`, `ttlMs`, `waitTimeMs`.
 - **Create** takes `name` plus any queue setting from section 7; a setting left out takes the broker's default.
 - **Update** changes only the settings given. A `defaultTtlMs` of 0 removes the default TTL.
-- **Enqueue** takes `payload`, and optionally `priority`, `shardKey`, and either `ttlMs` or `expiresAt`.
+- **Enqueue** takes `payload`, and optionally `priority`, `shardKey`, `acks` (`all` or `leader`), and either `ttlMs` or `expiresAt`.
 - **Dequeue** takes an optional `waitTimeMs` query parameter, at most 20 000. A waiting dequeue looks again every 50 ms and holds no request thread while it waits.
 - **Errors** are returned as problem-detail JSON with `status` and `detail`.
 
@@ -322,6 +330,7 @@ Every stack runs the same jar. The `dpq.coordinator` setting picks the coordinat
 | Request | `waitTime` on dequeue | 0 | Long poll vs immediate empty reply |
 | Broker | `failureDetectionTimeout` | 5 s | Failover speed vs false failovers |
 | Broker | `replicaLagMax` | 5 s | How quickly a slow follower stops blocking writes |
+| Broker | `commitTimeout` | 10 s | How long a write waits for its followers before it fails with 503 |
 | Broker | `sweeperInterval` | 100 ms | Timeliness of timeouts on idle shards vs background load |
 | Broker | `summaryInterval` | 200 ms | Cross-shard priority accuracy vs background load |
 

@@ -1,10 +1,15 @@
 package com.queue.distributedpriorityqueue.cluster;
 
+import com.queue.distributedpriorityqueue.coordination.ReplicaId;
 import com.queue.distributedpriorityqueue.coordination.ShardId;
+import com.queue.distributedpriorityqueue.coordination.ShardState;
+import com.queue.distributedpriorityqueue.coordination.Versioned;
 import com.queue.distributedpriorityqueue.core.QueueConfig;
 import com.queue.distributedpriorityqueue.log.InMemoryShardLog;
+import com.queue.distributedpriorityqueue.replication.FollowerFetcher;
 import com.queue.distributedpriorityqueue.replication.ShardReplica;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -12,34 +17,59 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
-/** The shard replicas this broker holds, created from the metadata the coordinator publishes. */
+/**
+ * The shard replicas this broker holds. They are created from the metadata the coordinator
+ * publishes, which also says whether each one leads its shard or follows another broker.
+ */
 final class LocalShards {
 
-    private final String brokerId;
+    private final ReplicaId self;
     private final Clock clock;
+    private final Duration replicaLagMax;
+    private final Duration commitTimeout;
+    /** Builds, but does not start, the fetcher that keeps a follower replica supplied by its leader. */
+    private final Function<ShardReplica, FollowerFetcher> fetcherFactory;
     private final Map<ShardId, ShardReplica> replicas = new ConcurrentHashMap<>();
-    private final List<Consumer<ShardReplica>> listeners = new ArrayList<>();
+    private final Map<ShardId, FollowerFetcher> fetchers = new ConcurrentHashMap<>();
+    private final List<Consumer<ShardReplica>> leaderListeners = new ArrayList<>();
 
-    LocalShards(String brokerId, Clock clock) {
-        this.brokerId = brokerId;
+    LocalShards(ReplicaId self, Clock clock, Duration replicaLagMax, Duration commitTimeout,
+            Function<ShardReplica, FollowerFetcher> fetcherFactory) {
+        this.self = self;
         this.clock = clock;
+        this.replicaLagMax = replicaLagMax;
+        this.commitTimeout = commitTimeout;
+        this.fetcherFactory = fetcherFactory;
     }
 
-    /** Creates replicas for the shards assigned to this broker and hands new settings to existing ones. */
-    void sync(QueueMetadata metadata) {
+    /** Creates replicas for the shards assigned to this broker, and gives each its settings and its role. */
+    synchronized void sync(QueueMetadata metadata) {
         QueueConfig config = metadata.config();
         for (int shard = 0; shard < metadata.shards().size(); shard++) {
-            if (!metadata.shards().get(shard).replicas().contains(brokerId)) {
+            Versioned<ShardState> state = metadata.shards().get(shard);
+            if (!state.value().replicas().contains(self.brokerId())) {
                 continue;
             }
-            int number = shard;
-            ShardReplica replica = replicas.computeIfAbsent(new ShardId(config.name(), shard), id -> {
-                ShardReplica created = new ShardReplica(number, config, new InMemoryShardLog(), clock);
-                announce(created);
-                return created;
-            });
+            ShardId id = new ShardId(config.name(), shard);
+            ShardReplica replica = replicas.computeIfAbsent(id, created -> new ShardReplica(
+                    id, self, config, new InMemoryShardLog(), clock, replicaLagMax, commitTimeout));
             replica.updateConfig(config);
+            if (self.equals(state.value().leader())) {
+                boolean wasLeader = replica.isLeader();
+                replica.lead(state);
+                if (!wasLeader) {
+                    leaderListeners.forEach(listener -> listener.accept(replica));
+                }
+            } else {
+                replica.follow(state);
+                fetchers.computeIfAbsent(id, created -> {
+                    FollowerFetcher fetcher = fetcherFactory.apply(replica);
+                    fetcher.start();
+                    return fetcher;
+                });
+            }
         }
     }
 
@@ -51,13 +81,17 @@ final class LocalShards {
         return replicas.values();
     }
 
-    /** Calls the listener for every replica that exists now and every one created later. */
-    synchronized void onCreated(Consumer<ShardReplica> listener) {
-        listeners.add(listener);
-        replicas.values().forEach(listener);
+    List<ShardReplica> leaders() {
+        return replicas.values().stream().filter(ShardReplica::isLeader).toList();
     }
 
-    private synchronized void announce(ShardReplica replica) {
-        listeners.forEach(listener -> listener.accept(replica));
+    /** Calls the listener for every replica that leads its shard now and every one that comes to lead later. */
+    synchronized void onLeading(Consumer<ShardReplica> listener) {
+        leaderListeners.add(listener);
+        leaders().forEach(listener);
+    }
+
+    void stop() {
+        fetchers.values().forEach(FollowerFetcher::stop);
     }
 }

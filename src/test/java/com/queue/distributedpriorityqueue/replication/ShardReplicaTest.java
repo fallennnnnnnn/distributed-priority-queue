@@ -494,7 +494,7 @@ class ShardReplicaTest {
     }
 
     private ShardReplica replicaWith(QueueConfig.Builder config) {
-        return new ShardReplica(0, config.build(), new InMemoryShardLog(), clock);
+        return ShardReplica.standalone(0, config.build(), new InMemoryShardLog(), clock);
     }
 
     private MessageId enqueue(String payload, String priority) {

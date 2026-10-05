@@ -14,7 +14,7 @@ Implementation plan for the design in [README.md](README.md).
 - [x] **0.1** Initialise the git repository. (S)
 - [x] **0.2** Dependencies: web, validation, actuator, Prometheus registry, etcd client (jetcd), grpc-java and the protobuf Gradle plugin; for tests, Awaitility and Testcontainers. gRPC and protobuf versions come from the Spring Boot BOM, which also moves the gRPC that jetcd brings onto the same version. *Done when* `./gradlew build` passes. (S)
 - [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `api`, `metrics`, `demo`, `exception`. (S)
-- [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the four broker settings from README section 7. Validated at startup. (S)
+- [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the broker settings from README section 7. Validated at startup. (S)
 - [x] **0.5** Injectable clock for all time-dependent code, plus a manual clock for tests. (S)
 
 ## Phase 1 — Shard state machine and log (one replica)
@@ -63,18 +63,18 @@ Implementation plan for the design in [README.md](README.md).
 
 ## Phase 3 — Replication (several brokers in one process)
 
-- [ ] **3.1** `BrokerClient` interface for broker-to-broker calls (fetch stream, forwarded requests, priority summaries), with an in-process transport that can drop, delay and partition. (M)
-- [ ] **3.2** In-process test cluster: N brokers sharing one `InMemoryCoordinator`; start, stop and partition brokers; controllable clock. (M)
-- [ ] **3.3** Fetch protocol as a stream per shard. The follower opens it with shard, replica incarnation, epoch, fetch offset and last entry epoch. The leader sends entries and the high watermark as events are appended; the follower reports its log end. `NOT_LEADER`, `FENCED_EPOCH` or `DIVERGED(truncateTo)` ends the stream. (M)
-- [ ] **3.4** Follower: keep the fetch stream open and reopen it when it ends; append, apply up to the high watermark; on `DIVERGED`, truncate and rebuild state by replay. (L)
-- [ ] **3.5** Leader: track each follower's progress; high watermark = lowest log end in the ISR; complete commit futures; commit timeout returns 503. (M)
-- [ ] **3.6** ISR shrink after `replicaLagMax` and expand on catch-up, through coordinator compare-and-swap. The new set is used only after the write succeeds. (M)
-- [ ] **3.7** Enqueue checks: 503 when ISR is below `minInSyncReplicas`; `acks=leader` and `acks=all`. (S)
-- [ ] **3.8** Replica assignment across brokers at queue creation; reject a `replicationFactor` larger than the number of live brokers. (S)
-- [ ] **3.9** Forward requests to the shard leader; on `NOT_LEADER`, refresh metadata and retry once. (M)
-- [ ] **3.10** Priority summaries exchanged between brokers every `summaryInterval`; dequeue routing uses them. (M)
-- [ ] **3.11** JSON metrics and dead-letter listing gather results from all shard leaders. (S)
-- [ ] **3.12** Replication tests (L):
+- [x] **3.1** `BrokerClient` interface for broker-to-broker calls (fetch stream, forwarded requests, priority summaries), with an in-process transport that can drop, delay and partition. (M)
+- [x] **3.2** In-process test cluster: N brokers sharing one `InMemoryCoordinator`; start, stop and partition brokers; controllable clock. (M)
+- [x] **3.3** Fetch protocol as a stream per shard. The follower opens it with shard, replica incarnation, epoch, fetch offset and last entry epoch. The leader sends entries and the high watermark as events are appended; the follower reports its log end. `NOT_LEADER`, `FENCED_EPOCH` or `DIVERGED` ends the stream; `DIVERGED` says where the follower's last epoch ends in the leader's log. (M)
+- [x] **3.4** Follower: keep the fetch stream open and reopen it when it ends; append, apply up to the high watermark; on `DIVERGED`, truncate to where the two logs last agree. A follower applies only committed entries, so its state needs no rebuild; that is needed when a leader steps down (4.1). (L)
+- [x] **3.5** Leader: track each follower's progress; high watermark = lowest log end in the ISR; complete commit futures; commit timeout returns 503. (M)
+- [x] **3.6** ISR shrink after `replicaLagMax` and expand on catch-up, through coordinator compare-and-swap. The new set is used only after the write succeeds. (M)
+- [x] **3.7** Enqueue checks: 503 when ISR is below `minInSyncReplicas`; `acks=leader` and `acks=all`. (S)
+- [x] **3.8** Replica assignment across brokers at queue creation; reject a `replicationFactor` larger than the number of live brokers. (S)
+- [x] **3.9** Forward requests to the shard leader; on `NOT_LEADER`, refresh metadata and retry once. (M)
+- [x] **3.10** Priority summaries exchanged between brokers every `summaryInterval`; dequeue routing uses them. (M)
+- [x] **3.11** JSON metrics and dead-letter listing gather results from all shard leaders. (S)
+- [x] **3.12** Replication tests (L):
   - an `acks=all` enqueue returns only after every ISR member has the event
   - a follower's state equals the leader's after catch-up
   - a slow follower leaves the ISR after `replicaLagMax` and writes continue

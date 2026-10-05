@@ -16,11 +16,17 @@ public final class TestBrokers {
     }
 
     public static BrokerSettings settings(String brokerId, int httpPort, Duration sweeperInterval) {
+        return settings(brokerId, httpPort, sweeperInterval, Duration.ofSeconds(10));
+    }
+
+    /** @param commitTimeout runs on real time, unlike the message timeouts, which follow the test's clock */
+    public static BrokerSettings settings(String brokerId, int httpPort, Duration sweeperInterval,
+            Duration commitTimeout) {
         return new BrokerSettings(brokerId,
                 new BrokerSettings.Advertised("localhost", httpPort, httpPort + 1000),
                 new BrokerSettings.Coordinator(BrokerSettings.CoordinatorType.MEMORY, List.of()),
                 new BrokerSettings.QueueDefaults(List.of("HIGH", "MEDIUM", "LOW"), Duration.ofSeconds(30), 3, null,
                         1, 1, 1, false),
-                Duration.ofSeconds(5), Duration.ofSeconds(5), sweeperInterval, Duration.ofMillis(200));
+                Duration.ofSeconds(5), Duration.ofSeconds(5), commitTimeout, sweeperInterval, Duration.ofMillis(200));
     }
 }

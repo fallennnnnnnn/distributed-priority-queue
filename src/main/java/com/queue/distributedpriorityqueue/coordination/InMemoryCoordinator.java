@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -89,14 +90,14 @@ public final class InMemoryCoordinator implements Coordinator {
     }
 
     @Override
-    public synchronized boolean updateShard(ShardId id, long expectedVersion, ShardState state) {
+    public synchronized OptionalLong updateShard(ShardId id, long expectedVersion, ShardState state) {
         Versioned<ShardState> current = shards.get(id);
         if (current == null || current.version() != expectedVersion) {
-            return false;
+            return OptionalLong.empty();
         }
         shards.put(id, new Versioned<>(state, ++version));
         tell(listener -> listener.onShardChanged(id));
-        return true;
+        return OptionalLong.of(version);
     }
 
     @Override

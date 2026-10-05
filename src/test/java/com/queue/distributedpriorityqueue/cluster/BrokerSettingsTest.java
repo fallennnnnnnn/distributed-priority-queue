@@ -28,6 +28,7 @@ class BrokerSettingsTest {
             assertThat(settings.coordinator().endpoints()).isEmpty();
             assertThat(settings.failureDetectionTimeout()).isEqualTo(Duration.ofSeconds(5));
             assertThat(settings.replicaLagMax()).isEqualTo(Duration.ofSeconds(5));
+            assertThat(settings.commitTimeout()).isEqualTo(Duration.ofSeconds(10));
             assertThat(settings.sweeperInterval()).isEqualTo(Duration.ofMillis(100));
             assertThat(settings.summaryInterval()).isEqualTo(Duration.ofMillis(200));
 
