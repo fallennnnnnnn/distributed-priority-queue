@@ -1,21 +1,18 @@
 # Distributed Priority Queue Service
 
-> **Status:** phases 0 to 4 of [WORK_ITEMS.md](WORK_ITEMS.md) are done.
->
-> - **Built and runnable:** one broker that meets the original spec: priority queues,
->   at-least-once delivery, retries, dead-lettering, metrics, the REST API and a producer /
->   consumer harness.
-> - **Built, and so far run only in tests:** the cluster. Shards are replicated between brokers,
->   an in-sync replica is elected when a leader fails, and a leader that returns steps down. The
->   tests run several brokers in one JVM, over a network and a coordinator connection they can
->   break; every row of the failure table in section 8 has a test.
-> - **Designed below, not built yet:** the etcd coordinator, the gRPC transport and the
->   docker-compose cluster (phase 5). Until then a broker started from the command line has no
->   way to reach another broker.
+A priority queue service with at-least-once delivery, retries and dead-lettering. It runs as a
+single broker, which is all the assignment asks for, or as a cluster: queues are split into
+shards, each shard is replicated between brokers, and an in-sync replica takes over when a
+leader fails.
+
+Everything described here is built and tested; section 12 lists what is not.
+[WORK_ITEMS.md](WORK_ITEMS.md) is the plan it was built from.
 
 ## Running it
 
-Needs JDK 17. Start one broker on port 8080:
+### One broker
+
+Needs JDK 17. Start a broker on port 8080:
 
 ```bash
 ./gradlew bootRun
@@ -26,14 +23,83 @@ In another terminal, run producers and consumers against it. They enqueue 2000 m
 dead-lettered:
 
 ```bash
-./gradlew harness --args="--url=http://localhost:8080"
+./gradlew harness --args="--urls=http://localhost:8080"
 ```
 
-Run the tests:
+### A cluster
+
+Needs Docker. This builds the image and starts three brokers and one etcd; the brokers' REST
+APIs are on ports 8081, 8082 and 8083:
+
+```bash
+docker compose up --build
+```
+
+Then run the harness against all three brokers, on a queue replicated three ways, and have it
+kill the broker that leads shard 0 half way through:
+
+```bash
+./gradlew harness --args="--urls=http://localhost:8081,http://localhost:8082,http://localhost:8083 --replicationFactor=3 --minInSyncReplicas=2 --skipAckPercent=0 --killCommand='docker compose kill {leader}'"
+```
+
+Bring the killed broker back, and it catches up and rejoins as a follower:
+
+```bash
+docker compose up -d broker-1
+```
+
+`docker compose --profile monitoring up` also starts Prometheus on port 9090, scraping all three
+brokers.
+
+### By hand
+
+```bash
+curl -X POST localhost:8080/queues -H 'Content-Type: application/json' -d '{"name":"orders"}'
+```
+
+```bash
+curl -X POST localhost:8080/queues/orders/messages -H 'Content-Type: application/json' -d '{"payload":"hello","priority":"HIGH"}'
+```
+
+```bash
+curl -X POST localhost:8080/queues/orders/messages/dequeue
+```
+
+```bash
+curl -X POST localhost:8080/queues/orders/messages/0-0/ack
+```
+
+```bash
+curl localhost:8080/queues/orders/metrics
+```
+
+### Tests
 
 ```bash
 ./gradlew test
 ```
+
+The tests need only a JDK, except the etcd coordinator tests, which start etcd in a container
+and are skipped when Docker is not running.
+
+## What a run shows
+
+Measured on one laptop (Apple silicon), with everything on the same machine, so read the
+latencies as "comfortably inside the target", not as a benchmark. Each run used 4 producers and
+8 consumers.
+
+| Run | Messages | Lost | Enqueue p95 | Dequeue p95 | Ack p95 |
+|---|---|---|---|---|---|
+| One broker, 20% of acks skipped | 2000 | 0 | 3.1 ms | 2.9 ms | 2.5 ms |
+| Three brokers, replicated three ways | 5000 | 0 | 9.7 ms | 9.5 ms | 8.9 ms |
+| Three brokers, leader killed half way | 2000 | 0 | 44.8 ms | 44.3 ms | 42.3 ms |
+
+In the failover run the harness killed broker-1, which led shard 0:
+
+- **No confirmed message was lost.** All 2000 confirmed enqueues were delivered and acknowledged.
+- **One duplicate.** An enqueue whose answer was lost in the failover was sent again, so the brokers counted 2001 messages and one was delivered twice. That is what at-least-once permits.
+- **Five seconds without a leader.** Shard 0 was leaderless for 5.0 s, which is the failure-detection timeout: the time it takes the dead broker's lease to run out. The other two shards kept serving.
+- **The killed broker rejoined.** Restarted, it came back with an empty log, caught up, and was added back to every in-sync set.
 
 ## 1. Problem summary
 
@@ -119,7 +185,7 @@ Added by our design, beyond the spec:
 | NFR-1 | **Thread safety (mandatory).** Correct with multiple concurrent producers and consumers. | One lock per shard; concurrency tests assert invariants |
 | NFR-2 | **At-least-once delivery.** A message is delivered until it is acknowledged, dead-lettered or expired. | Visibility timeout and redelivery; every transition replicated before the caller is answered |
 | NFR-3 | **Horizontal scalability.** The architecture must extend to multiple instances of the service. | Built: shards spread across brokers |
-| NFR-4 | **Latency.** p95 < 100 ms for enqueue and dequeue within a region (design target). | One replication round trip per write; measured by the harness |
+| NFR-4 | **Latency.** p95 < 100 ms for enqueue and dequeue within a region (design target). | One replication round trip per write. Measured p95 is under 10 ms on a healthy three-broker cluster (see "What a run shows") |
 | NFR-5 | **Durability.** Messages are not silently lost. | Built: replication to in-sync replicas, chosen per queue; the default is no replication (section 8 states the limits) |
 | NFR-6 | **Node failure.** Handle one queue instance going down. | Built: for replicated queues, leader election from the in-sync replicas |
 
@@ -252,13 +318,17 @@ Follower  B3   enq  enq  dlv  ack  enq  dlv
 What the coordinator stores:
 
 ```
-/brokers/{id}                      -> address, incarnation   (tied to a lease; vanishes when the broker dies)
-/queues/{name}/config              -> queue settings
-/queues/{name}/shards/{n}/state    -> { leader, epoch, isr, replicas }
+/dpq/brokers/{id}                -> address, incarnation   (tied to a lease; vanishes when the broker dies)
+/dpq/queues/{name}/config        -> queue settings
+/dpq/queues/{name}/shards/{n}    -> { leader, epoch, isr, replicas }
 ```
 
+The values are JSON, so `etcdctl get --prefix /dpq/` shows the cluster's state. A value's version
+is the etcd revision that last changed its key, and a compare-and-swap is a transaction that
+writes only if that revision is unchanged.
+
 - **Assignment:** on queue creation, the broker handling the request spreads each shard's replicas round-robin across live brokers and writes the config and all shard states in one transaction.
-- **Liveness:** each broker keeps a lease alive. When a broker dies, its key disappears after the failure-detection timeout.
+- **Liveness:** each broker keeps a lease alive. When a broker dies, its key disappears after the failure-detection timeout. A broker that has not managed to renew for two thirds of that time treats its lease as lost, so that it stops leading before the others elect a replacement. A broker restarted right after a crash waits for its previous lease to run out before it registers.
 - **Election:** when a shard has no live leader, each in-sync replica tries one compare-and-swap on the shard state: leader = me, epoch + 1, ISR minus the dead leader. The coordinator lets exactly one succeed. There is no separate controller broker.
 - **Eligibility:** ISR members are recorded by broker incarnation. A restarted broker has an empty log and a new incarnation, so it cannot be elected until it has caught up and been re-added.
 - **Fencing:** every broker-to-broker request names the epoch the sender believes in, and a broker serves it only if it leads the shard in that epoch. A leader that loses its lease stops serving at once. When it has registered again it reads every shard's state, and either carries on or steps down.
@@ -300,19 +370,26 @@ own port, with messages defined in protobuf:
 | Forwarded enqueue, dequeue, acknowledge | Single request and response |
 | Priority summaries | Single request and response |
 
+An error crosses the wire as the same exception the serving broker threw: its kind travels in a
+gRPC header, because a status code alone cannot tell "not the leader" from "not enough replicas".
+A call that fails without one of our errors means the broker could not be reached.
+
 ### 6.8 Deployment stacks
 
-Every stack runs the same jar. The `dpq.coordinator` setting picks the coordinator: `memory` or `etcd`.
+Every stack runs the same code. The `dpq.coordinator.type` setting picks the kind of broker:
+`memory` is a single broker with its coordinator inside the process, and `etcd` is one broker of
+a cluster, which also starts its gRPC server.
 
 | Stack | What runs | Coordinator | Broker-to-broker | Used for |
 |---|---|---|---|---|
 | Single broker | One JVM via `./gradlew bootRun` | In-memory | None (a cluster of one) | Development; meeting the original spec; reviewers without Docker |
-| In-process test cluster | Several brokers inside one test JVM | In-memory | In-process transport that can drop, delay and partition | Replication and failover tests |
-| Integration tests | Brokers on localhost ports, etcd in a Testcontainers container | etcd | gRPC | Coordinator contract tests; the gRPC transport |
+| In-process test cluster | Several brokers inside one test JVM | In-memory | A network inside the JVM that tests can hold, partition and delay | Replication and failover tests |
+| gRPC test cluster | Several brokers inside one test JVM, each with a gRPC server on a localhost port | In-memory | gRPC | Proving the cluster behaves the same over the real transport |
+| etcd in a container | The coordinator alone | etcd | None | The coordinator contract tests |
 | docker-compose cluster | One etcd node, three brokers, optional Prometheus | etcd | gRPC | The demo: load, kill a leader, show failover |
-| Production (described, not built) | Three or five etcd nodes, brokers with stable identities, a load balancer on the HTTP port, Prometheus | etcd | gRPC | The scaling story |
+| Production (described, not built) | Three or five etcd nodes, brokers with stable identities, a load balancer on the HTTP port, Prometheus | etcd | gRPC | Where this would go next |
 
-- **What each needs:** the first two need only a JDK. The integration tests and the compose cluster need Docker.
+- **What each needs:** the first three need only a JDK. The etcd tests and the compose cluster need Docker.
 - **Defaults work everywhere:** a queue created with default settings is not replicated, so it works on every stack, including a single broker. The compose demo creates its queue with `replicationFactor = 3` and `minInSyncReplicas = 2`.
 
 ## 7. Tunable settings
@@ -457,15 +534,50 @@ A new leader has replayed the same events, so its totals carry on from the old l
 
 ## 11. Testing approach
 
-- **State machine:** deterministic unit tests on a manual clock, covering ordering, visibility, redelivery, dead-lettering, TTL and acknowledge edge cases. No sleeps.
-- **Replay:** applying a recorded event sequence to a fresh state machine must reproduce the same state. This is what makes a follower equal to its leader.
-- **Concurrency:** many producers and consumers against one shard, asserting that no message is lost, no message is held by two consumers at once, and `enqueued = ready + in flight + acked + dead-lettered + expired`.
-- **Replication and failover:** several brokers in one process with an in-memory coordinator and a transport that can drop, delay and partition. Each row of the failure table in section 8 has a test.
-- **Coordinator:** one contract test suite run against both the in-memory coordinator and etcd (through Testcontainers).
-- **HTTP:** every endpoint and error code.
-- **End to end:** the harness runs against the docker-compose cluster, kills a shard leader mid-run and reports lost, duplicated and acknowledged counts.
+570 tests. The ideas behind them:
 
-## 12. Not in the plan
+- **Time is moved by hand.** Every time-dependent rule reads one injected clock, and tests advance it themselves. Timeout, TTL and lag tests are exact and never sleep to let time pass.
+- **Invariants, not interleavings.** Concurrency tests run real threads and then assert what must hold however they interleaved: no message is lost, no message is held by two consumers at once, and `enqueued = ready + in flight + acked + dead-lettered + expired`.
+- **Replay equals the original.** Applying a recorded event sequence to a fresh state machine must reproduce the same state. This is the property that makes a follower equal to its leader.
+- **Failures are injected, not waited for.** The multi-broker tests run brokers in one JVM over a network and a coordinator connection that the test can hold, partition and cut.
+- **One contract, two coordinators.** The same test suite runs against the in-memory coordinator and against etcd.
+- **The tests can fail.** At four points I planted a bug and checked that tests caught it: removing the shard lock, letting the high watermark ignore followers, letting an out-of-sync replica be elected, and skipping the state rebuild when a leader steps down.
+
+| What | Test classes | Tests |
+|---|---|---|
+| Queue behaviour on one shard: ordering, visibility, retries, dead letters, TTL, acks, priority levels, metrics | `ShardReplicaTest`, `QueueConfigTest`, `MessageIdTest`, `RateWindowTest` | 64 |
+| Event replay | `ShardStateMachineReplayTest` | 10 |
+| Concurrency on one shard | `ShardReplicaConcurrencyTest` | 310, mostly repetitions of one race |
+| The log | `InMemoryShardLogTest` | 10 |
+| Sharding, routing, the sweeper and waiting dequeues on one broker | `QueueServiceTest` | 21 |
+| Every REST endpoint and error code, over real HTTP | `QueueApiTest` | 29 |
+| Replication rules between two replicas | `ReplicationProtocolTest` | 30 |
+| Replication across brokers | `ReplicationTest`, `ReplicatedConcurrencyTest` | 19 |
+| Failover: one test per row of the failure table in section 8 | `FailoverTest` | 14 |
+| The cluster over real gRPC, and the wire format | `GrpcClusterTest`, `WireMapperTest` | 12 |
+| The coordinator contract, in memory and on etcd | `InMemoryCoordinatorTest`, `EtcdCoordinatorTest` | 27 |
+| Meters moving with leadership | `QueueMetersTest` | 3 |
+| Settings, the harness, and test support | `BrokerSettingsTest`, `QueueHarnessTest`, others | 21 |
+
+Where each requirement is tested:
+
+| Requirement | Tested in |
+|---|---|
+| FR-1, FR-2: create and configure queues | `QueueServiceTest`, `QueueApiTest` |
+| FR-3 to FR-5: enqueue, message IDs, TTL | `ShardReplicaTest` (Ttl, PriorityLevels), `QueueApiTest` (Enqueue) |
+| FR-6, FR-7: priority and FIFO | `ShardReplicaTest` (Ordering), `QueueServiceTest` (Sharding) |
+| FR-8: in-flight messages are invisible | `ShardReplicaTest` (Visibility), `ShardReplicaConcurrencyTest` |
+| FR-9, FR-10: acknowledge | `ShardReplicaTest` (Acknowledge), `QueueApiTest` (Acknowledge) |
+| FR-11 to FR-13: redelivery, retry count, dead letters | `ShardReplicaTest` (Visibility, RetryAndDeadLetter) |
+| FR-14: metrics | `ShardReplicaTest` (Metrics), `QueueApiTest` (MetricsAndDeadLetters), `QueueMetersTest` |
+| NFR-1: thread safety | `ShardReplicaConcurrencyTest`, `ReplicatedConcurrencyTest` |
+| NFR-2: at-least-once | `ShardReplicaConcurrencyTest`, `QueueHarnessTest`, `FailoverTest` |
+| NFR-3: several instances | `ReplicationTest` (AcrossBrokers), `GrpcClusterTest` |
+| NFR-4: latency | The harness runs in "What a run shows" |
+| NFR-5: durability | `ReplicationTest` (Committing, InSyncSet), `FailoverTest` |
+| NFR-6: node failure | `FailoverTest`, `GrpcClusterTest`, the harness with `--killCommand` |
+
+## 12. What we would do with more time
 
 | Item | What it would add |
 |---|---|
@@ -477,11 +589,18 @@ A new leader has replayed the same events, so its totals carry on from the old l
 | Explicit negative acknowledge, visibility extension | Faster retry; long-running work |
 | Dead-letter redrive | Move dead letters back to the queue |
 | Priority aging | Prevent starvation of low priority |
+| Security | TLS and authentication on both the REST API and the broker-to-broker port; today both are open |
+| Limits | A cap on payload size and on queue depth, with back-pressure to producers |
+
+The first two matter most. Without a log on disk, replication is the only thing between a
+message and its loss; without trimming, a long-lived shard eventually runs out of memory.
 
 ## 13. Deliverables
 
-1. Working, thread-safe implementation — correctness over completeness.
-2. Data model / internal design with sensible concurrency controls.
-3. Tests: concurrency tests, edge cases, a clear methodology.
-4. This README: key decisions, trade-offs, scalability story, what we would do with more time.
-5. Producer / consumer stubs demonstrating enqueue → dequeue → ack under concurrency.
+| Deliverable | Where |
+|---|---|
+| Working, thread-safe implementation | `src/main/java`; start with `ShardStateMachine`, which holds every queue rule, and `ShardReplica`, which holds the lock and the replication |
+| Data model and internal design | Sections 6.3 to 6.6 |
+| Tests | `src/test/java`; section 11 |
+| Key decisions, trade-offs, scalability story, what we would do with more time | Sections 6, 8, 10 and 12 |
+| Producer / consumer stubs | `QueueHarness`, run with `./gradlew harness` |

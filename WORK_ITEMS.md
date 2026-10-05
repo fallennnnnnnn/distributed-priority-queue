@@ -13,7 +13,7 @@ Implementation plan for the design in [README.md](README.md).
 
 - [x] **0.1** Initialise the git repository. (S)
 - [x] **0.2** Dependencies: web, validation, actuator, Prometheus registry, etcd client (jetcd), grpc-java and the protobuf Gradle plugin; for tests, Awaitility and Testcontainers. gRPC and protobuf versions come from the Spring Boot BOM, which also moves the gRPC that jetcd brings onto the same version. *Done when* `./gradlew build` passes. (S)
-- [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `api`, `metrics`, `demo`, `exception`. (S)
+- [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `transport`, `api`, `metrics`, `demo`, `exception`. (S)
 - [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the broker settings from README section 7. Validated at startup. (S)
 - [x] **0.5** Injectable clock for all time-dependent code, plus a manual clock for tests. (S)
 
@@ -109,19 +109,19 @@ Implementation plan for the design in [README.md](README.md).
 
 ## Phase 5 — etcd and deployment
 
-- [ ] **5.1** `EtcdCoordinator` using jetcd: key layout, lease keep-alive, transactions on mod revision, prefix watches. (M)
-- [ ] **5.2** Coordinator contract tests run against both `InMemoryCoordinator` and etcd in a container. (M)
-- [ ] **5.3** gRPC transport for `BrokerClient`: protobuf definitions for events and broker-to-broker calls; a plain grpc-java server on its own port; fetch as a two-way stream per shard, forwarding and summaries as single calls; reconnect on failure. *Done when* the phase 3 replication tests also pass over gRPC on localhost. (L)
-- [ ] **5.4** Dockerfile and docker-compose: etcd, three brokers (each with an HTTP and a gRPC port), optional Prometheus. (M)
-- [ ] **5.5** Harness against the cluster: create the queue with `replicationFactor = 3` and `minInSyncReplicas = 2`, run load, kill a shard leader mid-run, report lost, duplicated and acked counts and the failover time. (M)
-- [ ] **5.6** Latency check: p95 enqueue and dequeue from the harness, recorded in the README. (S)
+- [x] **5.1** `EtcdCoordinator` using jetcd: key layout, lease keep-alive, transactions on mod revision, prefix watches. (M)
+- [x] **5.2** Coordinator contract tests run against both `InMemoryCoordinator` and etcd in a container. (M)
+- [x] **5.3** gRPC transport for `BrokerClient`: protobuf definitions for events and broker-to-broker calls; a plain grpc-java server on its own port; fetch as a two-way stream per shard, forwarding and summaries as single calls; reconnect on failure. *Done when* replication, passing requests on and failover also pass over gRPC on localhost. The tests that hold or partition the network stay on the in-process transport, which is the one that can do that. (L)
+- [x] **5.4** Dockerfile and docker-compose: etcd, three brokers (each with an HTTP and a gRPC port), optional Prometheus. (M)
+- [x] **5.5** Harness against the cluster: create the queue with `replicationFactor = 3` and `minInSyncReplicas = 2`, run load, kill a shard leader mid-run, report lost, duplicated and acked counts and the failover time. (M)
+- [x] **5.6** Latency check: p95 enqueue and dequeue from the harness, recorded in the README. (S)
 
 **Exit:** `docker compose up` plus the demo shows a failover with no committed message lost.
 
 ## Phase 6 — README and submission
 
-- [ ] **6.1** README: how to run each deployment stack, test methodology, measured results, guarantees, limits, what we would do with more time. (M)
-- [ ] **6.2** Review pass: every setting in README section 7 exists in code and has a test; every FR and NFR maps to a test. (S)
+- [x] **6.1** README: how to run each deployment stack, test methodology, measured results, guarantees, limits, what we would do with more time. (M)
+- [x] **6.2** Review pass: every setting in README section 7 exists in code and has a test; every FR and NFR maps to a test. (S)
 
 ## Not planned
 
