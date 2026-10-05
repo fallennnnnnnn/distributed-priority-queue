@@ -19,20 +19,23 @@ import java.util.concurrent.CompletableFuture;
  * transport gives every other broker an object with the same interface that carries the calls
  * across.
  *
- * <p>The request methods fail with {@code NotLeaderException} when the broker asked does not lead
- * the shard. They are never passed on to a third broker.
+ * <p>Every request names the leader epoch the sender believes in. It fails with
+ * {@code NotLeaderException} when the broker asked does not lead the shard in that epoch, which
+ * tells a sender with old metadata, or a leader that has been replaced, to look again. Requests
+ * are never passed on to a third broker.
  */
 public interface BrokerApi {
 
-    CompletableFuture<MessageId> enqueue(ShardId shard, String payload, String priority, Duration ttl, Acks acks);
+    CompletableFuture<MessageId> enqueue(ShardId shard, int epoch, String payload, String priority, Duration ttl,
+            Acks acks);
 
-    CompletableFuture<Optional<MessageView>> dequeue(ShardId shard);
+    CompletableFuture<Optional<MessageView>> dequeue(ShardId shard, int epoch);
 
-    CompletableFuture<Boolean> ack(ShardId shard, MessageId messageId);
+    CompletableFuture<Boolean> ack(ShardId shard, int epoch, MessageId messageId);
 
-    CompletableFuture<ShardMetrics> metrics(ShardId shard);
+    CompletableFuture<ShardMetrics> metrics(ShardId shard, int epoch);
 
-    CompletableFuture<List<MessageView>> deadLetters(ShardId shard);
+    CompletableFuture<List<MessageView>> deadLetters(ShardId shard, int epoch);
 
     /** For each shard this broker leads, the rank of its highest ready priority, or -1 if nothing is ready. */
     CompletableFuture<Map<ShardId, Integer>> readySummary();

@@ -287,11 +287,11 @@ class ReplicationTest {
         void aBrokerRefusesARequestForAShardItDoesNotLead() {
             startWithReplicatedQueue(3, 2);
 
-            assertThat(cluster.broker(follower1).api().enqueue(SHARD, "a", "HIGH", null, Acks.ALL))
+            assertThat(cluster.broker(follower1).api().enqueue(SHARD, 0, "a", "HIGH", null, Acks.ALL))
                     .failsWithin(SOON).withThrowableThat().withCauseInstanceOf(NotLeaderException.class);
-            assertThat(cluster.broker(follower1).api().dequeue(SHARD))
+            assertThat(cluster.broker(follower1).api().dequeue(SHARD, 0))
                     .failsWithin(SOON).withThrowableThat().withCauseInstanceOf(NotLeaderException.class);
-            assertThat(cluster.broker(follower2).api().dequeue(new ShardId("no-such-queue", 0)))
+            assertThat(cluster.broker(follower2).api().dequeue(new ShardId("no-such-queue", 0), 0))
                     .failsWithin(SOON).withThrowableThat().withCauseInstanceOf(NotLeaderException.class);
         }
 

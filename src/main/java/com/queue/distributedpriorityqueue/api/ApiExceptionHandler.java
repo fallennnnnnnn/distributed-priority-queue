@@ -2,6 +2,7 @@ package com.queue.distributedpriorityqueue.api;
 
 import com.queue.distributedpriorityqueue.exception.BrokerUnreachableException;
 import com.queue.distributedpriorityqueue.exception.CommitTimeoutException;
+import com.queue.distributedpriorityqueue.exception.CoordinatorUnavailableException;
 import com.queue.distributedpriorityqueue.exception.MessageNotFoundException;
 import com.queue.distributedpriorityqueue.exception.NotEnoughReplicasException;
 import com.queue.distributedpriorityqueue.exception.NotLeaderException;
@@ -34,7 +35,7 @@ class ApiExceptionHandler {
 
     /** The request was sound but the cluster cannot serve it right now; the caller may retry. */
     @ExceptionHandler({ShardUnavailableException.class, NotLeaderException.class, NotEnoughReplicasException.class,
-            CommitTimeoutException.class, BrokerUnreachableException.class})
+            CommitTimeoutException.class, BrokerUnreachableException.class, CoordinatorUnavailableException.class})
     ProblemDetail unavailable(RuntimeException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage());
     }

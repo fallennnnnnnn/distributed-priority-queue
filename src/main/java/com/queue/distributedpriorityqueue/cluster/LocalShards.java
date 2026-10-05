@@ -21,7 +21,8 @@ import java.util.function.Function;
 
 /**
  * The shard replicas this broker holds. They are created from the metadata the coordinator
- * publishes, which also says whether each one leads its shard or follows another broker.
+ * publishes, which also says whether each one leads its shard or follows another broker, and
+ * they change role whenever that metadata names a new leader.
  */
 final class LocalShards {
 
@@ -33,7 +34,8 @@ final class LocalShards {
     private final Function<ShardReplica, FollowerFetcher> fetcherFactory;
     private final Map<ShardId, ShardReplica> replicas = new ConcurrentHashMap<>();
     private final Map<ShardId, FollowerFetcher> fetchers = new ConcurrentHashMap<>();
-    private final List<Consumer<ShardReplica>> leaderListeners = new ArrayList<>();
+    private final List<Consumer<ShardReplica>> onLeading = new ArrayList<>();
+    private final List<Consumer<ShardReplica>> onNoLongerLeading = new ArrayList<>();
 
     LocalShards(ReplicaId self, Clock clock, Duration replicaLagMax, Duration commitTimeout,
             Function<ShardReplica, FollowerFetcher> fetcherFactory) {
@@ -56,19 +58,30 @@ final class LocalShards {
             ShardReplica replica = replicas.computeIfAbsent(id, created -> new ShardReplica(
                     id, self, config, new InMemoryShardLog(), clock, replicaLagMax, commitTimeout));
             replica.updateConfig(config);
+            boolean wasLeading = replica.isLeader();
+            boolean followsSomeoneNew = false;
             if (self.equals(state.value().leader())) {
-                boolean wasLeader = replica.isLeader();
                 replica.lead(state);
-                if (!wasLeader) {
-                    leaderListeners.forEach(listener -> listener.accept(replica));
+            } else {
+                followsSomeoneNew = replica.follow(state);
+            }
+            if (replica.isLeader()) {
+                FollowerFetcher fetcher = fetchers.remove(id);
+                if (fetcher != null) {
+                    fetcher.stop();
                 }
             } else {
-                replica.follow(state);
-                fetchers.computeIfAbsent(id, created -> {
-                    FollowerFetcher fetcher = fetcherFactory.apply(replica);
+                FollowerFetcher fetcher = fetchers.get(id);
+                if (fetcher == null) {
+                    fetcher = fetcherFactory.apply(replica);
+                    fetchers.put(id, fetcher);
                     fetcher.start();
-                    return fetcher;
-                });
+                } else if (followsSomeoneNew) {
+                    fetcher.reconnect();
+                }
+            }
+            if (replica.isLeader() != wasLeading) {
+                (replica.isLeader() ? onLeading : onNoLongerLeading).forEach(listener -> listener.accept(replica));
             }
         }
     }
@@ -87,8 +100,13 @@ final class LocalShards {
 
     /** Calls the listener for every replica that leads its shard now and every one that comes to lead later. */
     synchronized void onLeading(Consumer<ShardReplica> listener) {
-        leaderListeners.add(listener);
+        onLeading.add(listener);
         leaders().forEach(listener);
+    }
+
+    /** Calls the listener whenever a replica that led its shard stops leading it. */
+    synchronized void onNoLongerLeading(Consumer<ShardReplica> listener) {
+        onNoLongerLeading.add(listener);
     }
 
     void stop() {

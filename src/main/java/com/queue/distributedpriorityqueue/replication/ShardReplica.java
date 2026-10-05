@@ -24,12 +24,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
@@ -55,7 +57,8 @@ public final class ShardReplica {
     private final ShardId id;
     private final ReplicaId self;
     private final ShardLog log;
-    private final ShardStateMachine state;
+    /** Replaced by a fresh one, rebuilt from the log, when a leader steps down. */
+    private ShardStateMachine state;
     private final Clock clock;
     private final Duration replicaLagMax;
     private final Duration commitTimeout;
@@ -66,6 +69,7 @@ public final class ShardReplica {
     /** Read without the lock by dequeue routing, so it may be a moment out of date. */
     private volatile int highestReadyRank = -1;
     private volatile int inSyncReplicas = 1;
+    private volatile int epoch;
 
     // Everything below is guarded by the lock.
 
@@ -82,6 +86,11 @@ public final class ShardReplica {
     /** Leader: the last moment each follower is known to have had everything the leader had. */
     private final Map<ReplicaId, Instant> lastCaughtUp = new HashMap<>();
     private boolean isrChangePending;
+
+    private final AtomicLong electionsWon = new AtomicLong();
+    private final AtomicLong resets = new AtomicLong();
+    /** The in-sync set proposed to the coordinator and not yet answered, or null. */
+    private List<ReplicaId> pendingIsr;
 
     public ShardReplica(ShardId id, ReplicaId self, QueueConfig config, ShardLog log, Clock clock,
             Duration replicaLagMax, Duration commitTimeout) {
@@ -121,6 +130,30 @@ public final class ShardReplica {
         return role == Role.LEADER;
     }
 
+    /** The epoch of the leader this replica is, or follows. */
+    public int epoch() {
+        return epoch;
+    }
+
+    /**
+     * Notes that this replica won an election. A reset is an election won without being in sync,
+     * which means the shard may have lost committed messages.
+     */
+    public void wonElection(boolean reset) {
+        electionsWon.incrementAndGet();
+        if (reset) {
+            resets.incrementAndGet();
+        }
+    }
+
+    public long electionsWon() {
+        return electionsWon.get();
+    }
+
+    public long resets() {
+        return resets.get();
+    }
+
     /** The rank of the highest priority with a ready message, or -1 when nothing is ready. */
     public int highestReadyRank() {
         return highestReadyRank;
@@ -131,20 +164,19 @@ public final class ShardReplica {
     /** Become the shard's leader, or, when already leading in this epoch, take a newer in-sync set. */
     public void lead(Versioned<ShardState> assigned) {
         List<CompletableFuture<Void>> nowCommitted;
+        List<FollowerSession> outdated = List.of();
         lock.lock();
         try {
-            boolean alreadyLeading = role == Role.LEADER && shardState.value().epoch() == assigned.value().epoch();
-            if (alreadyLeading && assigned.version() <= shardState.version()) {
+            if (assigned.version() <= shardState.version()) {
                 return;
             }
+            boolean alreadyLeading = role == Role.LEADER && epoch == assigned.value().epoch();
             adopt(assigned);
             if (!alreadyLeading) {
                 role = Role.LEADER;
                 // Everything in a new leader's log is now the shard's history, committed or not.
                 applyUpTo(log.endOffset());
-                sessions.clear();
-                followerLogEnd.clear();
-                lastCaughtUp.clear();
+                outdated = forgetFollowers();
                 Instant now = clock.instant();
                 for (ReplicaId member : assigned.value().isr()) {
                     lastCaughtUp.put(member, now);
@@ -155,22 +187,48 @@ public final class ShardReplica {
         } finally {
             lock.unlock();
         }
+        outdated.forEach(session -> session.toFollower.onEnd(FetchEnd.of(FetchEnd.Reason.FENCED_EPOCH)));
         complete(nowCommitted);
     }
 
-    /** Follow the leader named in {@code assigned}. */
-    public void follow(Versioned<ShardState> assigned) {
+    /**
+     * Follow the leader named in {@code assigned}. A replica that was leading steps down: it ends
+     * its followers' streams, fails the callers still waiting for a commit, and rebuilds its state
+     * from the committed part of its log, because it had applied entries that were never committed
+     * and that the new leader may not have.
+     *
+     * @return whether the leader or epoch this replica follows has changed
+     */
+    public boolean follow(Versioned<ShardState> assigned) {
+        List<FollowerSession> outdated = List.of();
+        List<CompletableFuture<Void>> abandoned = List.of();
+        boolean changed;
         lock.lock();
         try {
+            if (assigned.version() <= shardState.version()) {
+                return false;
+            }
+            ShardState before = shardState.value();
+            changed = role == Role.LEADER || before.epoch() != assigned.value().epoch()
+                    || !Objects.equals(before.leader(), assigned.value().leader());
             if (role == Role.LEADER) {
-                throw new IllegalStateException("shard " + id + ": a leader cannot yet step down to follower");
+                role = Role.FOLLOWER;
+                outdated = forgetFollowers();
+                abandoned = new ArrayList<>(commitWaiters.values());
+                commitWaiters.clear();
+                state = new ShardStateMachine(id.shard(), config.priorityLevels().size());
+                applied = 0;
+                applyUpTo(log.highWatermark());
+                highestReadyRank = -1;
             }
-            if (assigned.version() > shardState.version()) {
-                adopt(assigned);
-            }
+            adopt(assigned);
         } finally {
             lock.unlock();
         }
+        outdated.forEach(session -> session.toFollower.onEnd(FetchEnd.of(FetchEnd.Reason.NOT_LEADER)));
+        NotLeaderException steppedDown = new NotLeaderException(id);
+        abandoned.forEach(waiter -> waiter.completeExceptionally(steppedDown));
+        return changed;
     }
 
     // Leader: requests.
@@ -342,6 +400,7 @@ public final class ShardReplica {
                 return Optional.empty();
             }
             isrChangePending = true;
+            pendingIsr = next;
             return Optional.of(new IsrProposal(id, shardState.version(),
                     new ShardState(current.leader(), current.epoch(), next, current.replicas())));
         } finally {
@@ -355,6 +414,7 @@ public final class ShardReplica {
         lock.lock();
         try {
             isrChangePending = false;
+            pendingIsr = null;
             if (role != Role.LEADER || accepted.version() <= shardState.version()) {
                 return;
             }
@@ -375,6 +435,7 @@ public final class ShardReplica {
         lock.lock();
         try {
             isrChangePending = false;
+            pendingIsr = null;
         } finally {
             lock.unlock();
         }
@@ -555,16 +616,38 @@ public final class ShardReplica {
 
     private void adopt(Versioned<ShardState> newer) {
         shardState = newer;
+        epoch = newer.value().epoch();
         inSyncReplicas = newer.value().isr().size();
+    }
+
+    /** Ends everything a leader tracks about its followers. Returns their sessions, to be told after unlocking. */
+    private List<FollowerSession> forgetFollowers() {
+        List<FollowerSession> open = new ArrayList<>(sessions.values());
+        open.forEach(session -> session.closed = true);
+        sessions.clear();
+        followerLogEnd.clear();
+        lastCaughtUp.clear();
+        isrChangePending = false;
+        pendingIsr = null;
+        return open;
     }
 
     /**
      * Moves the high watermark to the lowest log end among the in-sync replicas. Returns the
      * waiters that are now committed; the caller completes them after releasing the lock.
+     *
+     * <p>While a change to the in-sync set is with the coordinator, members of both the old and
+     * the proposed set must have an entry before it counts as committed. A replica the
+     * coordinator has just accepted can be elected at once, so it must not be missing anything
+     * this leader committed in the meantime.
      */
     private List<CompletableFuture<Void>> advanceHighWatermark() {
         long lowestLogEnd = log.endOffset();
-        for (ReplicaId member : shardState.value().isr()) {
+        List<ReplicaId> mustHaveIt = new ArrayList<>(shardState.value().isr());
+        if (pendingIsr != null) {
+            mustHaveIt.addAll(pendingIsr);
+        }
+        for (ReplicaId member : mustHaveIt) {
             if (!member.equals(self)) {
                 lowestLogEnd = Math.min(lowestLogEnd, followerLogEnd.getOrDefault(member, 0L));
             }

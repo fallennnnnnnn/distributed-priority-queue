@@ -27,6 +27,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -54,9 +56,13 @@ public final class QueueService {
     private final Map<ShardId, Integer> remoteReadyRanks;
     private final Router router;
     private final ScheduledExecutorService scheduler;
+    /** True while this broker has lost its lease and must not act as a leader. */
+    private final BooleanSupplier fenced;
 
     QueueService(ReplicaId self, Coordinator coordinator, ClusterMetadata metadata, LocalShards localShards,
-            Peers peers, Map<ShardId, Integer> remoteReadyRanks, Router router, ScheduledExecutorService scheduler) {
+            Peers peers, Map<ShardId, Integer> remoteReadyRanks, Router router, ScheduledExecutorService scheduler,
+            BooleanSupplier fenced) {
+        this.fenced = fenced;
         this.self = self;
         this.coordinator = coordinator;
         this.metadata = metadata;
@@ -113,7 +119,7 @@ public final class QueueService {
         ShardId shard = new ShardId(queue, router.shardForEnqueue(config, shardKey));
         return onLeader(shard,
                 replica -> replica.enqueue(payload, priority, ttl, acks),
-                broker -> broker.enqueue(shard, payload, priority, ttl, acks));
+                (broker, epoch) -> broker.enqueue(shard, epoch, payload, priority, ttl, acks));
     }
 
     public CompletableFuture<MessageId> enqueue(String queue, String payload, String priority, Duration ttl,
@@ -142,14 +148,14 @@ public final class QueueService {
             return CompletableFuture.completedFuture(false);
         }
         ShardId shard = new ShardId(queue, id.shard());
-        return onLeader(shard, replica -> replica.ack(id), broker -> broker.ack(shard, id));
+        return onLeader(shard, replica -> replica.ack(id), (broker, epoch) -> broker.ack(shard, epoch, id));
     }
 
     public CompletableFuture<QueueMetrics> metrics(String queue) {
         QueueConfig config = require(queue).config();
         return fromEveryShard(config,
                 replica -> CompletableFuture.completedFuture(replica.metrics()),
-                BrokerApi::metrics)
+                shard -> (broker, epoch) -> broker.metrics(shard, epoch))
                 .thenApply(perShard -> sum(config, perShard));
     }
 
@@ -157,7 +163,7 @@ public final class QueueService {
         QueueConfig config = require(queue).config();
         return fromEveryShard(config,
                 replica -> CompletableFuture.completedFuture(replica.deadLetters()),
-                BrokerApi::deadLetters)
+                shard -> (broker, epoch) -> broker.deadLetters(shard, epoch))
                 .thenApply(perShard -> perShard.stream().flatMap(List::stream).toList());
     }
 
@@ -194,7 +200,7 @@ public final class QueueService {
             ShardId shard = new ShardId(queue, number);
             result = result.thenCompose(found -> found.isPresent()
                     ? CompletableFuture.completedFuture(found)
-                    : onLeader(shard, ShardReplica::dequeue, broker -> broker.dequeue(shard))
+                    : onLeader(shard, ShardReplica::dequeue, (broker, epoch) -> broker.dequeue(shard, epoch))
                             .handle((message, error) -> attempt.record(shard, message, error)));
         }
         return result.thenApply(found -> {
@@ -243,7 +249,7 @@ public final class QueueService {
      * shard, the metadata is read again and the request is tried once more on the leader it names.
      */
     private <T> CompletableFuture<T> onLeader(ShardId shard, Function<ShardReplica, CompletableFuture<T>> local,
-            Function<BrokerApi, CompletableFuture<T>> remote) {
+            BiFunction<BrokerApi, Integer, CompletableFuture<T>> remote) {
         return attemptOnLeader(shard, local, remote).exceptionallyCompose(error -> {
             if (!(unwrap(error) instanceof NotLeaderException)) {
                 return CompletableFuture.failedFuture(unwrap(error));
@@ -254,17 +260,22 @@ public final class QueueService {
     }
 
     private <T> CompletableFuture<T> attemptOnLeader(ShardId shard,
-            Function<ShardReplica, CompletableFuture<T>> local, Function<BrokerApi, CompletableFuture<T>> remote) {
+            Function<ShardReplica, CompletableFuture<T>> local,
+            BiFunction<BrokerApi, Integer, CompletableFuture<T>> remote) {
         try {
-            ReplicaId leader = require(shard.queue()).shard(shard.shard()).leader();
+            ShardState state = require(shard.queue()).shard(shard.shard());
+            ReplicaId leader = state.leader();
             if (leader == null) {
                 throw new ShardUnavailableException(shard);
             }
             if (leader.equals(self)) {
+                if (fenced.getAsBoolean()) {
+                    throw new ShardUnavailableException(shard);
+                }
                 return local.apply(localShards.find(shard).orElseThrow(() -> new NotLeaderException(shard)));
             }
             BrokerApi broker = peers.find(leader).orElseThrow(() -> new ShardUnavailableException(shard));
-            return remote.apply(broker);
+            return remote.apply(broker, state.epoch());
         } catch (RuntimeException e) {
             return CompletableFuture.failedFuture(e);
         }
@@ -273,11 +284,11 @@ public final class QueueService {
     /** Asks the leader of every shard of the queue, and gathers the answers in shard order. */
     private <T> CompletableFuture<List<T>> fromEveryShard(QueueConfig config,
             Function<ShardReplica, CompletableFuture<T>> local,
-            java.util.function.BiFunction<BrokerApi, ShardId, CompletableFuture<T>> remote) {
+            Function<ShardId, BiFunction<BrokerApi, Integer, CompletableFuture<T>>> remote) {
         List<CompletableFuture<T>> answers = new ArrayList<>(config.shards());
         for (int number = 0; number < config.shards(); number++) {
             ShardId shard = new ShardId(config.name(), number);
-            answers.add(onLeader(shard, local, broker -> remote.apply(broker, shard)));
+            answers.add(onLeader(shard, local, remote.apply(shard)));
         }
         return CompletableFuture.allOf(answers.toArray(CompletableFuture[]::new))
                 .thenApply(done -> answers.stream().map(CompletableFuture::join).toList());

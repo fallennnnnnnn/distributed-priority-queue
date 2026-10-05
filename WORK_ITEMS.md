@@ -87,13 +87,13 @@ Implementation plan for the design in [README.md](README.md).
 
 ## Phase 4 — Leader election and failover
 
-- [ ] **4.1** Role changes driven by watched shard state. Become leader: apply the log tail, reset follower progress. Become follower: stop serving, fail pending requests, start fetching. (L)
-- [ ] **4.2** Election: on a shard with no live leader, ISR members (matched by incarnation) try one compare-and-swap: leader = self, epoch + 1, ISR minus the dead leader. (M)
-- [ ] **4.3** Fencing: epoch on every internal request, lower epochs rejected; a leader stops serving when its lease is lost, then resumes or steps down after re-registering. (M)
-- [ ] **4.4** Broker restart: new incarnation, empty log, catch up as follower, added back to the ISR. (M)
-- [ ] **4.5** `uncleanLeaderElection`. A shard with `replicationFactor = 1` always recovers this way: its restarted broker takes over with an empty log, and the reset is counted. (S)
-- [ ] **4.6** Replication metrics: ISR size, under-replicated shards, epoch, log end, high watermark, elections, shard resets. (S)
-- [ ] **4.7** Failover tests, one per row of the README failure table (L):
+- [x] **4.1** Role changes driven by watched shard state. Become leader: apply the log tail, reset follower progress. Become follower: stop serving, fail pending requests, start fetching. (L)
+- [x] **4.2** Election: on a shard with no live leader, ISR members (matched by incarnation) try one compare-and-swap: leader = self, epoch + 1, ISR minus the dead leader. (M)
+- [x] **4.3** Fencing: epoch on every internal request, lower epochs rejected; a leader stops serving when its lease is lost, then resumes or steps down after re-registering. (M)
+- [x] **4.4** Broker restart: new incarnation, empty log, catch up as follower, added back to the ISR. (M)
+- [x] **4.5** `uncleanLeaderElection`. A shard with `replicationFactor = 1` always recovers this way: its restarted broker takes over with an empty log, and the reset is counted. (S)
+- [x] **4.6** Replication metrics: ISR size, under-replicated shards, epoch, log end, high watermark, elections, shard resets. (S)
+- [x] **4.7** Failover tests, one per row of the README failure table (L):
   - leader killed under load: no `acks=all` enqueue is lost; each ends acked or dead-lettered
   - the new leader was in the ISR and the epoch went up by one
   - in-flight messages keep deadlines and delivery counts; an acked message is never redelivered

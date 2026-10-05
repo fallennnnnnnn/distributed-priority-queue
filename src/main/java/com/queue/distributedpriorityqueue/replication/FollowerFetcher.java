@@ -51,6 +51,20 @@ public final class FollowerFetcher {
         connect();
     }
 
+    /** Drops the current stream and opens a new one, to whoever leads the shard now. */
+    public synchronized void reconnect() {
+        if (stopped) {
+            return;
+        }
+        FetchStream open = stream;
+        current = null;
+        stream = null;
+        if (open != null) {
+            open.close();
+        }
+        connect();
+    }
+
     public synchronized void stop() {
         stopped = true;
         current = null;

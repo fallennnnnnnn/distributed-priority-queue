@@ -391,6 +391,188 @@ class ReplicationProtocolTest {
         }
     }
 
+    @Nested
+    class ChangingRoles {
+
+        @Test
+        void aLeaderThatStepsDownFailsItsWaitingCallersAndForgetsWhatWasNeverCommitted() {
+            InMemoryShardLog log = log();
+            ShardReplica replica = leader(log, 1);
+            Recorder follower = new Recorder();
+            FetchStream stream = replica.openFetch(new FetchRequest(SHARD, FOLLOWER, 1, 0, -1), follower);
+            CompletableFuture<MessageId> committed = replica.enqueue("committed", "HIGH", null);
+            stream.reportLogEnd(1);
+            CompletableFuture<MessageId> waiting = replica.enqueue("never committed", "HIGH", null);
+            assertThat(committed).isCompleted();
+            assertThat(waiting).isNotDone();
+            assertThat(replica.snapshot().liveMessages()).hasSize(2);
+
+            boolean changed = replica.follow(state(FOLLOWER, 2, List.of(FOLLOWER), 2));
+
+            assertThat(changed).isTrue();
+            assertThat(replica.status().role()).isEqualTo(ShardReplica.Role.FOLLOWER);
+            assertThat(replica.epoch()).isEqualTo(2);
+            assertThat(waiting).failsWithin(1, TimeUnit.SECONDS).withThrowableThat()
+                    .withCauseInstanceOf(NotLeaderException.class);
+            assertThat(follower.ends).containsExactly(FetchEnd.of(FetchEnd.Reason.NOT_LEADER));
+            assertThat(replica.snapshot().liveMessages()).extracting(message -> message.payload())
+                    .containsExactly("committed");
+            assertThat(log.endOffset()).as("the tail stays until the new leader says where to cut").isEqualTo(2);
+            assertThatExceptionOfType(NotLeaderException.class).isThrownBy(() -> replica.enqueue("a", "HIGH", null));
+        }
+
+        @Test
+        void aDeposedLeaderCutsItsUncommittedTailWhenItFollowsTheNewLeader() {
+            InMemoryShardLog oldLeaderLog = log(1, 1, 1);
+            InMemoryShardLog newLeaderLog = log(1, 2, 2);
+            ShardReplica oldLeader = replica(LEADER, oldLeaderLog);
+            oldLeader.lead(state(LEADER, 1, List.of(LEADER, FOLLOWER), 1));
+            ShardReplica newLeader = replica(FOLLOWER, newLeaderLog);
+            newLeader.lead(state(FOLLOWER, 2, List.of(FOLLOWER), 2));
+
+            oldLeader.follow(state(FOLLOWER, 2, List.of(FOLLOWER), 2));
+            connect(oldLeader, newLeader).start();
+
+            assertThat(oldLeaderLog.read(0, 100)).isEqualTo(newLeaderLog.read(0, 100));
+            newLeader.isrChanged(new Versioned<>(newLeader.proposeIsrChange().orElseThrow().state(), 3));
+            assertThat(oldLeader.snapshot()).isEqualTo(newLeader.snapshot());
+        }
+
+        @Test
+        void aFollowerKeepsCommittedEntriesItHadNotYetLearnedWereCommitted() {
+            // Offsets 0 to 5 were committed, but this follower had only been told about the first four.
+            // Offsets 6 and 7 were never committed, and the new leader does not have them.
+            TruncationRecordingLog followerLog = new TruncationRecordingLog();
+            ShardReplica follower = replica(FOLLOWER, followerLog);
+            follower.follow(state(LEADER, 1, List.of(LEADER, FOLLOWER), 1));
+            follower.appendFetched(log(1, 1, 1, 1, 1, 1, 1, 1).read(0, 100), 4);
+            InMemoryShardLog newLeaderLog = log(1, 1, 1, 1, 1, 1, 2, 2);
+            ReplicaId third = new ReplicaId("broker-3", "a");
+            ShardReplica newLeader = new ShardReplica(SHARD, third, config, newLeaderLog, clock, LAG_MAX,
+                    Duration.ofSeconds(10));
+            Versioned<ShardState> newEpoch = new Versioned<>(new ShardState(third, 2, List.of(third, FOLLOWER),
+                    List.of("broker-1", "broker-2", "broker-3")), 2);
+            newLeader.lead(newEpoch);
+
+            follower.follow(newEpoch);
+            new FollowerFetcher(follower, (request, toFollower) -> Optional.of(newLeader.openFetch(request, toFollower)),
+                    () -> { }, scheduler, Duration.ofMillis(10)).start();
+
+            assertThat(followerLog.truncations).as("only the two uncommitted entries are dropped").containsExactly(6L);
+            assertThat(followerLog.read(0, 100)).isEqualTo(newLeaderLog.read(0, 100));
+            assertThat(follower.status().highWatermark()).isEqualTo(8);
+            assertThat(follower.snapshot()).isEqualTo(newLeader.snapshot());
+        }
+
+        @Test
+        void anOlderViewOfTheShardIsIgnored() {
+            ShardReplica leading = leader(log(), 1);
+            assertThat(leading.follow(state(FOLLOWER, 0, List.of(FOLLOWER), 0))).isFalse();
+            assertThat(leading.isLeader()).isTrue();
+
+            ShardReplica following = replica(LEADER, log());
+            following.follow(state(FOLLOWER, 5, List.of(FOLLOWER), 9));
+            following.lead(state(LEADER, 4, List.of(LEADER), 8));
+            assertThat(following.isLeader()).isFalse();
+            assertThat(following.epoch()).isEqualTo(5);
+        }
+
+        @Test
+        void aLeaderElectedAgainInANewEpochEndsTheStreamsOfTheOldOne() {
+            ShardReplica replica = leader(log(), 1);
+            Recorder follower = new Recorder();
+            replica.openFetch(new FetchRequest(SHARD, FOLLOWER, 1, 0, -1), follower);
+
+            replica.lead(state(LEADER, 2, List.of(LEADER, FOLLOWER), 2));
+
+            assertThat(follower.ends).containsExactly(FetchEnd.of(FetchEnd.Reason.FENCED_EPOCH));
+            assertThat(replica.epoch()).isEqualTo(2);
+            assertThat(replica.isLeader()).isTrue();
+        }
+
+        @Test
+        void whileAFollowerIsBeingAddedTheHighWatermarkAlreadyWaitsForIt() {
+            ShardReplica leader = replica(LEADER, log());
+            leader.lead(state(LEADER, 1, List.of(LEADER), 1));
+            FetchStream stream = leader.openFetch(new FetchRequest(SHARD, FOLLOWER, 1, 0, -1), new Recorder());
+            IsrProposal joining = leader.proposeIsrChange().orElseThrow();
+            assertThat(joining.state().isr()).containsExactly(LEADER, FOLLOWER);
+
+            // The coordinator may already list the follower as in sync, and so as electable.
+            CompletableFuture<MessageId> enqueued = leader.enqueue("a", "HIGH", null);
+            assertThat(enqueued).isNotDone();
+
+            stream.reportLogEnd(1);
+            assertThat(enqueued).isCompleted();
+        }
+
+        @Test
+        void aRefusedAdditionStopsCounting() {
+            ShardReplica leader = replica(LEADER, log());
+            leader.lead(state(LEADER, 1, List.of(LEADER), 1));
+            leader.openFetch(new FetchRequest(SHARD, FOLLOWER, 1, 0, -1), new Recorder());
+            leader.proposeIsrChange().orElseThrow();
+            CompletableFuture<MessageId> enqueued = leader.enqueue("a", "HIGH", null);
+            assertThat(enqueued).isNotDone();
+
+            leader.isrChangeRefused();
+
+            assertThat(leader.enqueue("b", "HIGH", null)).isCompleted();
+            assertThat(enqueued).isCompleted();
+        }
+    }
+
+    private ShardReplica replica(ReplicaId self, com.queue.distributedpriorityqueue.log.ShardLog log) {
+        return new ShardReplica(SHARD, self, config, log, clock, LAG_MAX, Duration.ofSeconds(10));
+    }
+
+    private static Versioned<ShardState> state(ReplicaId leader, int epoch, List<ReplicaId> isr, long version) {
+        return new Versioned<>(new ShardState(leader, epoch, isr, List.of("broker-1", "broker-2")), version);
+    }
+
+    /** An in-memory log that remembers where it was truncated. */
+    private static final class TruncationRecordingLog implements com.queue.distributedpriorityqueue.log.ShardLog {
+
+        final List<Long> truncations = new ArrayList<>();
+        private final InMemoryShardLog log = new InMemoryShardLog();
+
+        @Override
+        public long append(int epoch, ShardEvent event) {
+            return log.append(epoch, event);
+        }
+
+        @Override
+        public List<LogEntry> read(long fromOffset, int maxEntries) {
+            return log.read(fromOffset, maxEntries);
+        }
+
+        @Override
+        public long endOffset() {
+            return log.endOffset();
+        }
+
+        @Override
+        public void truncate(long toOffset) {
+            truncations.add(toOffset);
+            log.truncate(toOffset);
+        }
+
+        @Override
+        public long highWatermark() {
+            return log.highWatermark();
+        }
+
+        @Override
+        public void advanceHighWatermark(long highWatermark) {
+            log.advanceHighWatermark(highWatermark);
+        }
+
+        @Override
+        public Optional<EpochEnd> endOfEpoch(int epoch) {
+            return log.endOfEpoch(epoch);
+        }
+    }
+
     private ShardReplica leader(InMemoryShardLog log, int epoch) {
         ShardReplica replica = new ShardReplica(SHARD, LEADER, config, log, clock, LAG_MAX, Duration.ofSeconds(10));
         replica.lead(state(epoch));

@@ -142,29 +142,29 @@ public final class InProcessNetwork implements AutoCloseable {
         }
 
         @Override
-        public CompletableFuture<MessageId> enqueue(ShardId shard, String payload, String priority, Duration ttl,
-                Acks acks) {
-            return call(broker -> broker.enqueue(shard, payload, priority, ttl, acks));
+        public CompletableFuture<MessageId> enqueue(ShardId shard, int epoch, String payload, String priority,
+                Duration ttl, Acks acks) {
+            return call(broker -> broker.enqueue(shard, epoch, payload, priority, ttl, acks));
         }
 
         @Override
-        public CompletableFuture<Optional<MessageView>> dequeue(ShardId shard) {
-            return call(broker -> broker.dequeue(shard));
+        public CompletableFuture<Optional<MessageView>> dequeue(ShardId shard, int epoch) {
+            return call(broker -> broker.dequeue(shard, epoch));
         }
 
         @Override
-        public CompletableFuture<Boolean> ack(ShardId shard, MessageId messageId) {
-            return call(broker -> broker.ack(shard, messageId));
+        public CompletableFuture<Boolean> ack(ShardId shard, int epoch, MessageId messageId) {
+            return call(broker -> broker.ack(shard, epoch, messageId));
         }
 
         @Override
-        public CompletableFuture<ShardMetrics> metrics(ShardId shard) {
-            return call(broker -> broker.metrics(shard));
+        public CompletableFuture<ShardMetrics> metrics(ShardId shard, int epoch) {
+            return call(broker -> broker.metrics(shard, epoch));
         }
 
         @Override
-        public CompletableFuture<List<MessageView>> deadLetters(ShardId shard) {
-            return call(broker -> broker.deadLetters(shard));
+        public CompletableFuture<List<MessageView>> deadLetters(ShardId shard, int epoch) {
+            return call(broker -> broker.deadLetters(shard, epoch));
         }
 
         @Override

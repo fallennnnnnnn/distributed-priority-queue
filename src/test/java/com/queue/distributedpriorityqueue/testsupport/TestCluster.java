@@ -25,6 +25,7 @@ public final class TestCluster implements AutoCloseable {
     public final InProcessNetwork network = new InProcessNetwork();
     private final Function<String, BrokerSettings> settings;
     private final Map<String, Broker> brokers = new LinkedHashMap<>();
+    private final Map<String, CoordinatorLink> links = new LinkedHashMap<>();
 
     public TestCluster(int size) {
         this(size, Duration.ofSeconds(10));
@@ -40,8 +41,10 @@ public final class TestCluster implements AutoCloseable {
 
     /** Starts a broker. A broker started again under the same ID is a new incarnation with empty logs. */
     public Broker start(String brokerId) {
-        Broker broker = new Broker(settings.apply(brokerId), coordinator, network.transportFor(brokerId), clock);
+        CoordinatorLink link = new CoordinatorLink(coordinator);
+        Broker broker = new Broker(settings.apply(brokerId), link, network.transportFor(brokerId), clock);
         brokers.put(brokerId, broker);
+        links.put(brokerId, link);
         network.register(brokerId, broker.api());
         broker.start();
         return broker;
@@ -54,6 +57,26 @@ public final class TestCluster implements AutoCloseable {
         broker.close();
     }
 
+    /**
+     * The broker dies without a word: it vanishes from the network, and its lease runs out, which
+     * is how the others learn of it.
+     */
+    public void crash(String brokerId) {
+        Broker broker = brokers.remove(brokerId);
+        network.unregister(brokerId);
+        broker.kill();
+        coordinator.expireLease(brokerId);
+    }
+
+    /** The broker can no longer reach the coordinator, and its lease runs out. */
+    public void cutFromCoordinator(String brokerId) {
+        links.get(brokerId).cut();
+    }
+
+    public void restoreCoordinator(String brokerId) {
+        links.get(brokerId).restore();
+    }
+
     public Broker broker(String brokerId) {
         return brokers.get(brokerId);
     }
@@ -62,14 +85,16 @@ public final class TestCluster implements AutoCloseable {
         return broker(brokerId).queues();
     }
 
+    /** The brokers that are running. */
     public List<Broker> brokers() {
         return new ArrayList<>(brokers.values());
     }
 
-    /** The broker the coordinator names as the shard's leader. */
+    /** The broker the coordinator names as the shard's leader, or null if that broker is not running. */
     public Broker leaderOf(ShardId shard) {
         ReplicaId leader = coordinator.shard(shard).orElseThrow().value().leader();
-        return broker(leader.brokerId());
+        Broker broker = leader == null ? null : broker(leader.brokerId());
+        return broker != null && broker.info().replicaId().equals(leader) ? broker : null;
     }
 
     /** The running brokers that hold a replica of the shard without leading it. */

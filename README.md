@@ -1,15 +1,17 @@
 # Distributed Priority Queue Service
 
-> **Status:** phases 0 to 3 of [WORK_ITEMS.md](WORK_ITEMS.md) are done.
+> **Status:** phases 0 to 4 of [WORK_ITEMS.md](WORK_ITEMS.md) are done.
 >
 > - **Built and runnable:** one broker that meets the original spec: priority queues,
 >   at-least-once delivery, retries, dead-lettering, metrics, the REST API and a producer /
 >   consumer harness.
-> - **Built, and so far run only in tests:** replication between brokers with a fixed leader per
->   shard: followers, the high watermark, in-sync replica upkeep, and passing requests on to the
->   leader. The tests run several brokers in one JVM over a network they can break.
-> - **Designed below, not built yet:** leader election and failover (phase 4), and the etcd
->   coordinator, gRPC transport and docker-compose cluster (phase 5).
+> - **Built, and so far run only in tests:** the cluster. Shards are replicated between brokers,
+>   an in-sync replica is elected when a leader fails, and a leader that returns steps down. The
+>   tests run several brokers in one JVM, over a network and a coordinator connection they can
+>   break; every row of the failure table in section 8 has a test.
+> - **Designed below, not built yet:** the etcd coordinator, the gRPC transport and the
+>   docker-compose cluster (phase 5). Until then a broker started from the command line has no
+>   way to reach another broker.
 
 ## Running it
 
@@ -239,7 +241,7 @@ Follower  B3   enq  enq  dlv  ack  enq  dlv
 - **Commit rule:** the leader answers a caller only when that caller's event is below the high watermark. This holds for enqueue, dequeue and acknowledge.
 - **Locking:** the leader decides, appends and applies under the shard lock, then waits for the commit outside the lock.
 - **Followers** apply events only up to the high watermark.
-- **ISR upkeep:** the leader removes a follower that has not caught up within `replicaLagMax` and adds it back once it has. The leader writes each change to the coordinator first and uses the new set only after that write succeeds.
+- **ISR upkeep:** the leader removes a follower that has not caught up within `replicaLagMax` and adds it back once it has. The leader writes each change to the coordinator first and uses the new set only after that write succeeds. While the change is with the coordinator, an event counts as committed only when the members of both the old and the proposed set have it, because a replica the coordinator has just accepted can be elected at once.
 - **Batches:** the leader sends a follower one batch at a time and the next one only when the follower has confirmed the last, so a slow follower never has more than one batch in transit.
 - **Minimum ISR:** when the ISR is smaller than `minInSyncReplicas`, enqueues with `acks=all` are rejected with 503. That includes an enqueue that was still waiting when the ISR shrank below the minimum: it is not reported as safe. Dequeue and acknowledge keep working so consumers can drain the queue.
 - **Commit timeout:** a write that the in-sync followers do not confirm within `commitTimeout` fails with 503. It stays in the leader's log and may still be committed, so a caller that retries can cause a duplicate.
@@ -259,8 +261,10 @@ What the coordinator stores:
 - **Liveness:** each broker keeps a lease alive. When a broker dies, its key disappears after the failure-detection timeout.
 - **Election:** when a shard has no live leader, each in-sync replica tries one compare-and-swap on the shard state: leader = me, epoch + 1, ISR minus the dead leader. The coordinator lets exactly one succeed. There is no separate controller broker.
 - **Eligibility:** ISR members are recorded by broker incarnation. A restarted broker has an empty log and a new incarnation, so it cannot be elected until it has caught up and been re-added.
-- **Fencing:** every broker-to-broker request carries the epoch and replicas reject a lower one. A leader that loses its lease stops serving.
-- **After a leader change:** log entries carry the epoch that wrote them. A follower whose log diverges from the new leader's is told where the two logs last agree, truncates to that point and refetches. It then rebuilds its state by replaying its log.
+- **Fencing:** every broker-to-broker request names the epoch the sender believes in, and a broker serves it only if it leads the shard in that epoch. A leader that loses its lease stops serving at once. When it has registered again it reads every shard's state, and either carries on or steps down.
+- **Stepping down:** a replaced leader ends its followers' streams, fails the callers still waiting for a commit, and rebuilds its state from the committed part of its log, because it had applied events that were never committed.
+- **After a leader change:** log entries carry the epoch that wrote them. A follower whose log diverges from the new leader's is told where its last epoch ends in the leader's log, and truncates to the point where the two logs last agree. That never removes a committed entry, even one the follower had not yet been told was committed.
+- **One automatic retry:** the broker that took a request tries it once more when the broker it asked turns out not to lead the shard, which covers a leader change in mid-request.
 - **No in-sync replica alive:** the shard goes offline. With `uncleanLeaderElection` on, any live replica may take over, accepting that committed messages may be lost.
 - **Unreplicated shards:** a shard with `replicationFactor = 1` always recovers the unclean way. Its broker comes back with an empty log and takes over again, since there is no other copy to wait for. Each such reset is counted in a metric.
 
@@ -343,8 +347,8 @@ has one copy, on one broker. Surviving a broker failure starts at `replicationFa
 ## 8. Guarantees and failure handling
 
 **Delivery.** At-least-once. A message is delivered until it is acknowledged, dead-lettered or
-expired. Duplicates are possible after a visibility timeout and when a caller retries a request
-whose answer was lost in a failover.
+expired. Duplicates are possible after a visibility timeout, and when a request whose answer was
+lost in a failover is tried again, whether by the caller or by the broker's one automatic retry.
 
 **Ordering.** Priority and FIFO are strict within a shard. A queue with `shards = 1` has strict
 global ordering. With more shards, ordering across shards is best-effort: a priority summary can
@@ -401,8 +405,19 @@ Each broker exports these at `/actuator/prometheus` for the shards it leads, lab
 
 `GET /queues/{name}/metrics` returns the same numbers as JSON, already summed over the queue's shards.
 
-The cluster adds replication metrics: in-sync replica count per shard, under-replicated shards,
-leader epoch, log end offset, high watermark, leader elections and shard resets.
+The cluster adds replication metrics, published by a shard's leader like the ones above:
+
+| Prometheus metric | Type | Meaning |
+|---|---|---|
+| `dpq_in_sync_replicas` | gauge | Replicas that have every committed event |
+| `dpq_under_replicated` | gauge | 1 when the in-sync set is smaller than the replication factor |
+| `dpq_leader_epoch` | gauge | Goes up by one with every new leader |
+| `dpq_log_end_offset`, `dpq_high_watermark` | gauge | The gap between them is what is waiting for followers |
+| `dpq_leader_elections_total` | counter | Elections this broker won for the shard |
+| `dpq_shard_resets_total` | counter | Elections won without being in sync, which may have lost messages |
+
+A broker publishes a shard's metrics while it leads the shard and withdraws them when it stops.
+A new leader has replayed the same events, so its totals carry on from the old leader's.
 
 ## 10. Decisions and trade-offs
 
