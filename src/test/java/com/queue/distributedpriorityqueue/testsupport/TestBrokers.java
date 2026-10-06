@@ -10,7 +10,7 @@ public final class TestBrokers {
     private TestBrokers() {
     }
 
-    /** The README defaults, except for the ID and ports, and with the sweeper effectively off. */
+    /** The documented defaults, except for the ID and ports, and with the sweeper effectively off. */
     public static BrokerSettings settings(String brokerId, int httpPort) {
         return settings(brokerId, httpPort, Duration.ofHours(1));
     }

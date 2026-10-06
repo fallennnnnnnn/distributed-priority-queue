@@ -31,7 +31,7 @@ import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-/** What happens when leaders die, are cut off, or come back. One test per row of the README's failure table. */
+/** What happens when leaders die, are cut off, or come back. One test per row of the failure table in docs/guarantees.md. */
 @Timeout(60)
 class FailoverTest {
 

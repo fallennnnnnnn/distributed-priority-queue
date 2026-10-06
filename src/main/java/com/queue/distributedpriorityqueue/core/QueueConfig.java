@@ -70,7 +70,7 @@ public record QueueConfig(
         return priorityLevels.size() - 1;
     }
 
-    /** Starts from the defaults in README section 7: one shard and no replication. */
+    /** Starts from the documented defaults (docs/api.md): one shard and no replication. */
     public static Builder builder(String name) {
         return new Builder(name);
     }

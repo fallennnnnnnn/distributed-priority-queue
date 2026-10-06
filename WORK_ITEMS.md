@@ -1,6 +1,6 @@
 # Work items
 
-Implementation plan for the design in [README.md](README.md).
+Implementation plan for the design in [README.md](README.md). The sections it mentions now live under [docs/](docs/).
 
 - `[ ]` not started, `[x]` done.
 - Size is relative effort, not a time estimate: **S** small, **M** medium, **L** large.
@@ -14,12 +14,12 @@ Implementation plan for the design in [README.md](README.md).
 - [x] **0.1** Initialise the git repository. (S)
 - [x] **0.2** Dependencies: web, validation, actuator, Prometheus registry, etcd client (jetcd), grpc-java and the protobuf Gradle plugin; for tests, Awaitility and Testcontainers. gRPC and protobuf versions come from the Spring Boot BOM, which also moves the gRPC that jetcd brings onto the same version. *Done when* `./gradlew build` passes. (S)
 - [x] **0.3** Package layout: `core`, `log`, `replication`, `coordination`, `cluster`, `transport`, `api`, `metrics`, `demo`, `exception`. (S)
-- [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the broker settings from README section 7. Validated at startup. (S)
+- [x] **0.4** Broker settings (`dpq.*`): broker ID, advertised address (HTTP and gRPC ports), coordinator type (`memory` or `etcd`) and endpoints, queue defaults, the broker settings from docs/api.md. Validated at startup. (S)
 - [x] **0.5** Injectable clock for all time-dependent code, plus a manual clock for tests. (S)
 
 ## Phase 1 — Shard state machine and log (one replica)
 
-- [x] **1.1** Domain types: per-queue priority levels (ordered names, 1 to 10, default `HIGH, MEDIUM, LOW`), `Message`, `MessageId` (`{shard}-{offset}`), `QueueConfig` with validation and the defaults from README section 7 (one shard, no replication). (S)
+- [x] **1.1** Domain types: per-queue priority levels (ordered names, 1 to 10, default `HIGH, MEDIUM, LOW`), `Message`, `MessageId` (`{shard}-{offset}`), `QueueConfig` with validation and the defaults from docs/api.md (one shard, no replication). (S)
 - [x] **1.2** Events: `Enqueued`, `Delivered`, `Acked`, `Requeued`, `DeadLettered`, `Expired`, as plain records. Their wire format comes with the gRPC transport in 5.3. (S)
 - [x] **1.3** `ShardStateMachine.apply(event)`: one lane per priority level, ID map, deadline index, TTL index, dead letters, counters. (M)
 - [x] **1.4** Decision methods that produce events: `enqueue`, `dequeue(now)`, `ack`, `reclaim(now)`. (M)
@@ -93,7 +93,7 @@ Implementation plan for the design in [README.md](README.md).
 - [x] **4.4** Broker restart: new incarnation, empty log, catch up as follower, added back to the ISR. (M)
 - [x] **4.5** `uncleanLeaderElection`. A shard with `replicationFactor = 1` always recovers this way: its restarted broker takes over with an empty log, and the reset is counted. (S)
 - [x] **4.6** Replication metrics: ISR size, under-replicated shards, epoch, log end, high watermark, elections, shard resets. (S)
-- [x] **4.7** Failover tests, one per row of the README failure table (L):
+- [x] **4.7** Failover tests, one per row of the failure table in docs/guarantees.md (L):
   - leader killed under load: no `acks=all` enqueue is lost; each ends acked or dead-lettered
   - the new leader was in the ISR and the epoch went up by one
   - in-flight messages keep deadlines and delivery counts; an acked message is never redelivered
@@ -105,7 +105,7 @@ Implementation plan for the design in [README.md](README.md).
   - coordinator outage: brokers stop at lease expiry and resume afterwards with no data lost
   - two replicas racing an election: exactly one wins
 
-**Exit:** every row of the README failure table has a passing test.
+**Exit:** every row of the failure table in docs/guarantees.md has a passing test.
 
 ## Phase 5 — etcd and deployment
 
@@ -114,17 +114,17 @@ Implementation plan for the design in [README.md](README.md).
 - [x] **5.3** gRPC transport for `BrokerClient`: protobuf definitions for events and broker-to-broker calls; a plain grpc-java server on its own port; fetch as a two-way stream per shard, forwarding and summaries as single calls; reconnect on failure. *Done when* replication, passing requests on and failover also pass over gRPC on localhost. The tests that hold or partition the network stay on the in-process transport, which is the one that can do that. (L)
 - [x] **5.4** Dockerfile and docker-compose: etcd, three brokers (each with an HTTP and a gRPC port), optional Prometheus. (M)
 - [x] **5.5** Harness against the cluster: create the queue with `replicationFactor = 3` and `minInSyncReplicas = 2`, run load, kill a shard leader mid-run, report lost, duplicated and acked counts and the failover time. (M)
-- [x] **5.6** Latency check: p95 enqueue and dequeue from the harness, recorded in the README. (S)
+- [x] **5.6** Latency check: p95 enqueue and dequeue from the harness, recorded in docs/operations.md. (S)
 
 **Exit:** `docker compose up` plus the demo shows a failover with no committed message lost.
 
 ## Phase 6 — README and submission
 
 - [x] **6.1** README: how to run each deployment stack, test methodology, measured results, guarantees, limits, what we would do with more time. (M)
-- [x] **6.2** Review pass: every setting in README section 7 exists in code and has a test; every FR and NFR maps to a test. (S)
+- [x] **6.2** Review pass: every setting in docs/api.md exists in code and has a test; every FR and NFR maps to a test. (S)
 
 ## Not planned
 
-Listed in README section 12: log on disk, log trimming and snapshots, changing shard count, leader
+Listed in docs/decisions.md: log on disk, log trimming and snapshots, changing shard count, leader
 rebalancing and replica reassignment, idempotent enqueue, negative acknowledge and visibility
 extension, dead-letter redrive, priority aging.

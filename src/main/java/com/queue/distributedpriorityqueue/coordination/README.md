@@ -7,23 +7,28 @@ are written down. Every broker reads the same notebook.
 ## What is written in it
 
 ```
-  Coordinator
-  ├── brokers
-  │     ├── broker-1    alive, reachable at host:port
-  │     └── broker-2    alive, reachable at host:port
-  ├── queues
-  │     └── orders      the queue's settings                              version 12
-  └── shards
-        ├── orders/0    leader: broker-1   epoch: 3   in sync: 1, 2       version 14
-        └── orders/1    leader: broker-2   epoch: 1   in sync: 2          version 13
+  /dpq/
+  ├── brokers/
+  │     ├── broker-1       incarnation, host, HTTP and gRPC port      tied to broker-1's lease
+  │     └── broker-2       ...                                        tied to broker-2's lease
+  └── queues/
+        └── orders/
+              ├── config     the queue's settings                                   version 12
+              └── shards/
+                    ├── 0    leader: broker-1   epoch: 3   isr: [1, 2]   replicas: [1, 2, 3]   version 14
+                    └── 1    leader: broker-2   epoch: 1   isr: [2]      replicas: [2, 3, 1]   version 13
 ```
+
+These are the etcd keys; the in-memory coordinator holds the same structure in maps. Values are
+JSON, so `etcdctl get --prefix /dpq/` shows the cluster's state.
 
 | Word | Meaning |
 |---|---|
 | Leader | The broker that serves the shard right now. |
 | Epoch | A counter that goes up by one each time the shard gets a new leader. |
 | In sync (ISR) | The replicas that have every committed event. Only they may become leader. |
-| Version | A number that changes every time an entry is rewritten. |
+| Replicas | The brokers assigned to hold the shard. |
+| Version | A number that changes every time an entry is rewritten. In etcd it is the revision that last changed the key. |
 
 ## Changing an entry: "only if nobody changed it first"
 
@@ -38,7 +43,18 @@ is refused. This is called compare-and-swap.
 ```
 
 When two brokers try to become leader at the same moment, exactly one wins. The other sees the
-refusal, reads the entry again and finds the new leader.
+refusal, reads the entry again and finds the new leader. In etcd a compare-and-swap is a
+transaction that writes only if the key's revision is still the one the caller read. Creating a
+queue is also one transaction: the config and every shard state are written together, or not at
+all if the name is taken.
+
+## Leases: knowing who is alive
+
+A broker's entry is tied to a lease that the broker must keep renewing. When the broker dies the
+lease runs out after the failure-detection timeout (5 s by default) and its entry disappears,
+which is the signal for elections. A broker that has not managed to renew for two thirds of
+that time assumes the worst and tells the broker it has lost its lease, so it stops leading
+before anyone else can be elected. The in-memory coordinator lets tests expire a lease on demand.
 
 ## Hearing about changes
 
@@ -56,8 +72,8 @@ value. Changes are reported one at a time, in order.
 ```
 
 The incarnation is a fresh random ID each time a broker process starts. A restarted broker has
-an empty log, so it must not be mistaken for the replica it was before. The different
-incarnation is how the rest of the cluster can tell.
+an empty log, so it must not be mistaken for the replica it was before. In-sync sets are
+recorded by `ReplicaId`, so a restarted broker is out of sync until its leader adds it back.
 
 ## The classes
 
@@ -65,13 +81,13 @@ incarnation is how the rest of the cluster can tell.
 |---|---|
 | `Coordinator` | The interface: register a broker, create and update queues, update a shard, watch for changes. |
 | `InMemoryCoordinator` | A coordinator inside the JVM. Used by the single-broker setup and by tests that run several brokers in one process. |
+| `EtcdCoordinator` | The same contract on etcd, through jetcd: leases with keep-alive, transactions on revisions, prefix watches. |
+| `MetadataJson` | How `QueueConfig`, `BrokerInfo` and `ShardState` are written as JSON values. |
 | `BrokerInfo` | A live broker: its ID, incarnation, host and ports. |
 | `ReplicaId` | A broker ID plus its incarnation. |
 | `ShardId` | A queue name plus a shard number, written `orders/0`. |
 | `ShardState` | A shard's leader, epoch, in-sync replicas and assigned brokers. |
 | `Versioned` | A value together with the version to quote when replacing it. |
 
-## Not built yet
-
-A coordinator backed by etcd, so that brokers in separate processes share one notebook. Leader
-elections are also still to come; compare-and-swap is the building block they will use.
+The same contract test runs against both coordinators; the etcd one starts etcd in a container
+and is skipped when Docker is not running.

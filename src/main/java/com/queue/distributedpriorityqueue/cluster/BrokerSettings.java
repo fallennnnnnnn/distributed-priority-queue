@@ -17,8 +17,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * What one broker is told at startup, bound from {@code dpq.*}. The defaults are the ones in README
- * section 7, so a broker started with no configuration runs as a single-broker cluster.
+ * What one broker is told at startup, bound from {@code dpq.*}. The defaults are the ones in
+ * docs/api.md, so a broker started with no configuration runs as a single-broker cluster.
  */
 @Validated
 @ConfigurationProperties("dpq")
