@@ -1,7 +1,7 @@
 # Distributed Priority Queue Service
 
 A priority queue service with at-least-once delivery, retries and dead-lettering. It runs as a
-single broker, which is all the assignment asks for, or as a cluster: queues are split into
+single broker or as a cluster: queues are split into
 shards, each shard is replicated between brokers, and an in-sync replica takes over when a
 leader fails.
 

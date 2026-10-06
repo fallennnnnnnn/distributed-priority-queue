@@ -36,7 +36,7 @@ Each row has a test in `FailoverTest`.
 Deadlines are absolute times stamped by the leader. After a failover the new leader checks them
 against its own clock, so clock skew between brokers can make a redelivery slightly early or late.
 
-## Questions the spec leaves open
+## Behaviour choices
 
 | Question | Decision |
 |---|---|

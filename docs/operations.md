@@ -66,7 +66,7 @@ a cluster, which also starts its gRPC server.
 
 | Stack | What runs | Coordinator | Broker-to-broker | Used for |
 |---|---|---|---|---|
-| Single broker | One JVM via `make run` | In-memory | None (a cluster of one) | Development; meeting the original spec; reviewers without Docker |
+| Single broker | One JVM via `make run` | In-memory | None (a cluster of one) | Development; anyone without Docker |
 | In-process test cluster | Several brokers inside one test JVM | In-memory | A network inside the JVM that tests can hold, partition and delay | Replication and failover tests |
 | gRPC test cluster | Several brokers inside one test JVM, each with a gRPC server on a localhost port | In-memory | gRPC | Proving the cluster behaves the same over the real transport |
 | etcd in a container | The coordinator alone | etcd | None | The coordinator contract tests |
@@ -101,7 +101,7 @@ In the failover run the harness killed broker-1, which led shard 0:
 
 ## Metrics
 
-The metrics the spec asks for:
+The queue-level metrics:
 
 | ID | Metric | Definition |
 |---|---|---|

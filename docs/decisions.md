@@ -2,7 +2,7 @@
 
 | Decision | Choice | Why | Alternative considered |
 |---|---|---|---|
-| Build or describe the cluster | Build it | Durability and failover become implemented, testable behaviour instead of prose. Cost: several times the code, and strict global ordering is lost once `shards > 1`. | Single-node in-memory service with a written scaling story (all the spec requires) |
+| Single node or cluster | Cluster | Durability and failover become implemented, testable behaviour instead of prose. Cost: several times the code, and strict global ordering is lost once `shards > 1`. | A single-node in-memory service with a written scaling story |
 | Priority levels | Defined per queue at creation | Each queue fits its own workload, one level gives a plain FIFO queue, and adding a level needs no code change. | A fixed `HIGH` / `MEDIUM` / `LOW` enum |
 | Replication model | Leader and in-sync replicas | Clients tune durability against availability (`replicationFactor`, `minInSyncReplicas`, `acks`, `uncleanLeaderElection`). Survives one failure with two replicas. | A Raft group per shard through a library: less code and no external process, but a fixed majority quorum and none of those settings |
 | Default replication | None: `replicationFactor = 1` | A queue made with defaults works on any cluster size, including one broker, and replication is a cost the client opts into. Cost: a default queue does not survive the loss of its broker. | Three replicas with two in sync by default: safe out of the box, but queue creation fails on fewer than three brokers |

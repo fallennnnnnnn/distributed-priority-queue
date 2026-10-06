@@ -6,8 +6,8 @@ Implementation plan for the design in [README.md](README.md). The sections it me
 - Size is relative effort, not a time estimate: **S** small, **M** medium, **L** large.
 - Each phase ends with a working, tested service. A phase starts only after the previous exit
   check passes.
-- **Phase 2 is the point where the original assignment is fully met on one broker.** Phases 3 to 5
-  add the cluster.
+- **Phase 2 is the point where a complete single-broker service exists.** Phases 3 to 5 add
+  the cluster.
 
 ## Phase 0 — Project setup
 
@@ -59,7 +59,7 @@ Implementation plan for the design in [README.md](README.md). The sections it me
 - [x] **2.10** Producer / consumer harness against one broker: concurrent producers and consumers, some consumers skipping acks; prints the invariants and metrics. (M)
 - [x] **2.11** Single-broker stack: `./gradlew bootRun` starts one broker with the in-memory coordinator and no other process, and a queue created with default settings works on it. *Done when* the harness from 2.10 passes against it. (S)
 
-**Exit:** every FR, metric and deliverable in the original spec is met by one broker.
+**Exit:** every functional requirement and metric is met by one broker.
 
 ## Phase 3 — Replication (several brokers in one process)
 
@@ -118,7 +118,7 @@ Implementation plan for the design in [README.md](README.md). The sections it me
 
 **Exit:** `docker compose up` plus the demo shows a failover with no committed message lost.
 
-## Phase 6 — README and submission
+## Phase 6 — Documentation
 
 - [x] **6.1** README: how to run each deployment stack, test methodology, measured results, guarantees, limits, what we would do with more time. (M)
 - [x] **6.2** Review pass: every setting in docs/api.md exists in code and has a test; every FR and NFR maps to a test. (S)

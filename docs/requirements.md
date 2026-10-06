@@ -1,7 +1,7 @@
 # Requirements
 
-What the assignment asks for, and what this implementation adds. The design that meets these
-is in the [README](../README.md).
+What the service must do. The design that meets these requirements is in the
+[README](../README.md).
 
 ## Problem summary
 
@@ -19,8 +19,8 @@ Three things define it:
 
 ## Scope
 
-The spec requires an in-memory, single-node service plus a written scaling story. We chose to build
-the scaling story instead of only describing it (see [decisions](decisions.md) for why and what it costs).
+A single in-memory broker meets the core requirements on its own. The cluster is built as well,
+rather than only described; [decisions](decisions.md) says why and what it costs.
 
 | In scope | Out of scope |
 |---|---|
@@ -50,7 +50,7 @@ the scaling story instead of only describing it (see [decisions](decisions.md) f
 
 ## Functional requirements
 
-From the spec:
+Core:
 
 | ID | Area | Requirement |
 |---|---|---|
@@ -69,7 +69,7 @@ From the spec:
 | FR-13 | Dead-letter | When the redelivery count exceeds the queue's configured limit, move the message to a dead-letter queue instead of redelivering it. |
 | FR-14 | Metrics | Expose the queue-level metrics listed in [operations](operations.md#metrics) in a form a system like Prometheus can scrape. |
 
-Added by our design, beyond the spec:
+Cluster and tunability:
 
 | ID | Area | Requirement |
 |---|---|---|
@@ -91,9 +91,9 @@ Added by our design, beyond the spec:
 | NFR-5 | **Durability.** Messages are not silently lost. | Built: replication to in-sync replicas, chosen per queue; the default is no replication ([guarantees](guarantees.md) states the limits) |
 | NFR-6 | **Node failure.** Handle one queue instance going down. | Built: for replicated queues, leader election from the in-sync replicas |
 
-## Deliverables
+## Where to find things
 
-| Deliverable | Where |
+| What | Where |
 |---|---|
 | Working, thread-safe implementation | `src/main/java`; start with `ShardStateMachine`, which holds every queue rule, and `ShardReplica`, which holds the lock and the replication |
 | Data model and internal design | [README](../README.md), architecture section |
